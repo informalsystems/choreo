@@ -91,7 +91,10 @@ module tendermint{
   type TimeoutKind = ProposeTimeout | PreVoteTimeout | PreCommitTimeout
   type TimeoutEvent = { kind: TimeoutKind, round: Round}
 
-
+  pure def no_effects(s: LocalState): HandlerOutput = {
+    {state: s, external: Set(), internal: Set(), logging: Set()}
+  }
+  
   pure def get_proposals(s: LocalState): Set[ProposeMsg] =
     s.messages.filterMap(m => {
       match m {
@@ -105,6 +108,14 @@ module tendermint{
     s.messages.filterMap(m => {
       match m {
         | PreVote(p) => if (p.round == round and p.id == id) Some(p) else None
+        | _ => None
+      }
+    })
+
+  pure def get_all_prevotes(s: LocalState): Set[PreVoteMsg] =
+    s.messages.filterMap(m => {
+      match m {
+        | PreVote(p) => Some(p)
         | _ => None
       }
     })
@@ -150,7 +161,7 @@ module tendermint{
 
 
   pure def valid(v: Value): bool = {
-  VALID_VALUES.contains(v)
+    VALID_VALUES.contains(v)
   }
 
   /// A value hash in an abstract way.
@@ -412,6 +423,214 @@ module tendermint{
         {state: s, external: Set(), internal: Set(), logging: Set()}
     }
   }
+  // -------------------------------------------------------- New Logic ------------------------------------------------------------
+
+  pure def process_proposal_at_propose_stage_1(s: LocalState, msg: ProposeMsg): HandlerOutput = {
+    pure val upon_condition = and {
+      // upon <PROPOSAL, hp , roundp , v, −1>
+      msg.valid_round == -1,
+      // from proposer(hp, roundp)
+      msg.src == PROPOSER.get(s.round),
+      // while stepp = propose
+      s.stage == ProposeStage,
+    }
+    if (not(upon_condition)) no_effects(s) else
+
+    pure val broadcast =
+      if (msg.proposal.valid() and (s.locked_round == -1 or s.locked_value == Some(msg.proposal)))
+        Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(msg.proposal.id()) }))
+      else
+        Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))
+
+    {
+      state: { ...s, stage: PreVoteStage, after_prevote_for_first_time: true },
+      external: Set(broadcast),
+      logging: Set(CollectEvidence(Propose(msg))),
+      internal: Set()
+    }
+  }  
+  
+  
+  pure def process_proposal_and_quorum_at_propose_stage_1(
+    s: LocalState,
+    msg: ProposeMsg,
+  ): HandlerOutput = {
+    pure val prevotes = s.get_prevotes(msg.valid_round, Some(msg.proposal.id()))
+
+    pure val upon_condition = and {
+      // upon <PROPOSAL, hp , roundp , v, vr>
+      // from proposer(hp, roundp)
+      msg.src == PROPOSER.get(s.round),
+      // AND 2f + 1 <PREVOTE, hp , vr, id(v)>
+      prevotes.map(m => m.src).size() >= 2 * F + 1,
+      // while stepp = propose
+      s.stage == ProposeStage,
+      // ∧ (vr ≥ 0 ∧ vr < roundp)
+      msg.valid_round >= 0 and msg.valid_round < s.round,
+    }
+    if (not(upon_condition)) no_effects(s) else
+
+    pure val broadcast =
+      if (msg.proposal.valid() and (s.locked_round <= msg.valid_round or s.locked_value == msg.proposal))
+        Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(msg.proposal.id()) }))
+      else
+        Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))
+
+    {
+      state: { ...s, stage: PreVoteStage, after_prevote_for_first_time: true },
+      output: Set(broadcast, CollectEvidence(Propose(msg)), Breakpoint)
+        .union(prevotes.map(m => CollectEvidence(PreVote(m))))
+    }
+  }
+
+  pure def process_prevote_quorum_on_prevote_stage_1(s: LocalState, msg: PreVoteMsg): HandlerOutput = {
+    pure val prevotes = s.get_all_prevotes().filter(r => r.round == s.round) 
+
+    pure val upon_condition = and {
+      // upon 2f + 1 <PREVOTE, hp , roundp , ∗>
+      prevotes.map(m => m.src).size() >= 2 * F + 1,
+      // while stepp = prevote for the first time
+      s.stage == PreVoteStage and s.after_prevote_for_first_time,
+    }
+    if (not(upon_condition)) no_effects(s) else
+
+    {
+      state: { ...s, after_prevote_for_first_time: false },
+      internal: Set(StartTimeout({ kind: PreVoteTimeout, round: msg.round })),
+      logging: prevotes.map(m => CollectEvidence(PreVote(m))),
+      external: Set()
+    }
+  }
+  
+  pure def process_proposal_and_quorum_after_prevote_stage_for_the_first_time_1(s: LocalState, msg: ProposeMsg): HandlerOutput = {
+    pure val prevotes = s.get_prevotes(s.round, Some(msg.proposal.id()))
+
+    pure val upon_condition = and {
+      // upon <PROPOSAL, hp , roundp , v, ∗>
+      // from proposer(hp , roundp)
+      msg.src == PROPOSER.get(s.round),
+      // AND 2f + 1 <PREVOTE, hp , roundp , id(v)>
+      prevotes.map(m => m.src).size() >= 2 * F + 1,
+      // while valid(v) ∧ stepp ≥ prevote for the first time
+      s.stage.in(Set(PreVoteStage, PreCommitStage)) and s.after_prevote_for_first_time,
+    }
+    if (not(upon_condition)) no_effects(s) else
+
+      pure val base_result = {
+        state: {
+          ...s,
+          valid_value: Some(msg.proposal),
+          valid_round: s.round,
+        },
+        logging: Set(CollectEvidence(Propose(msg)))
+          .union(prevotes.map(m => CollectEvidence(PreVote(m)))),
+        external: Set(),
+        internal: Set()
+      }
+
+      val s2 = base_result.state
+      if (s2.stage == PreVoteStage) 
+        {
+          state: { ...s2, locked_value: Some(msg.proposal), locked_round: msg.round, stage: PreCommitStage },
+          external: Set(Broadcast(PreCommit({ src: s2.process_id, round: msg.round, id: Some(msg.proposal.id()) }))),
+          internal: Set(),
+          logging: base_result.logging
+        }
+      else 
+        {state: s2, external: Set(), internal: Set(), logging: base_result.logging}
+        
+  
+  }
+
+
+  pure def process_prevote_quorum_at_prevote_stage_1(s: LocalState, msg: PreVoteMsg): HandlerOutput= {
+    pure val prevotes = s.get_prevotes(s.round, None)
+    pure val upon_condition = and {
+      // upon 2f + 1 <PREVOTE, hp , roundp , nil>
+      prevotes.map(m => m.src).size() >= 2 * F + 1,
+      // while stepp = prevote
+      s.stage == PreVoteStage,
+    }
+    if (not(upon_condition)) no_effects(s) else
+
+    {
+      state: { ...s, stage: PreCommitStage },
+      external: Set(Broadcast(PreCommit({ src: s.process_id, round: msg.round, id: None }))),
+      logging: prevotes.map(m => CollectEvidence(PreVote(m))),
+      internal: Set()
+    }
+  }
+
+  // line 47
+  pure def process_precommit_quorum_for_the_first_time_1(s: LocalState, msg: PreVoteMsg): HandlerOutput = {
+    pure val precommits = s.get_all_precommits().filter(r => r.round == s.round)
+
+    pure val upon_condition = and {
+      // upon 2f + 1 <PRECOMMIT, hp , roundp , ∗> for the first time
+      precommits.map(m => m.src).size() >= 2 * F + 1,
+      not(s.precommit_quorum),
+    }
+    if (not(upon_condition)) no_effects(s) else
+      {
+        state: { ...s, precommit_quorum: true },
+        internal: Set(StartTimeout({ kind: PreCommitTimeout, round: msg.round })),
+        logging:  precommits.map(m => CollectEvidence(PreCommit(m))),
+        external: Set()
+      }
+  }
+
+  pure def process_proposal_and_precommit_quorum_but_no_decision_1(s: LocalState, msg: ProposeMsg): HandlerOutput = {
+    pure val precommits = s.get_precommits(msg.round, msg.proposal.id())
+
+    pure val upon_condition = and {
+      // upon <PROPOSAL, hp , r, v, ∗>
+      // from proposer(hp , r)
+      msg.src == PROPOSER.get(msg.round),
+      // AND 2f + 1 <PRECOMMIT, hp , r, id(v)>
+      precommits.map(m => m.src).size() >= 2 * F + 1,
+      // while decisionp[hp] = nil
+      s.decision == None,
+    }
+    if (not(upon_condition)) no_effects(s) else
+    if (not(msg.proposal.valid())) no_effects(s) else
+      {
+        state: {
+          ...s,
+          decision: Some(msg.proposal),
+          stage: DecidedStage,
+          // TODO: Maybe we model a single consensus round, maybe we want more. If more, we need to add:
+          // height: s.height + 1
+          // reset
+        },
+        logging: Set(CollectEvidence(Propose(msg)))
+          .union(precommits.map(m => CollectEvidence(PreCommit(m)))),
+        external: Set(),
+        internal: Set()
+        // TODO Send start round msg to reset
+      }
+  }
+
+
+
+
+
+
+
+  // -------------------------------------------------------- Message Handlers ------------------------------------------------------------
+  pure def process_propose(s: LocalState, msg: ProposeMsg): HandlerOutput = {
+    val s0 = {... s, messages: s.messages.setAdd(Propose(msg))}
+    val res1 = process_proposal_at_propose_stage(s0, Propose(msg))
+    val res2 = process_proposal_and_quorum_at_propose_stage(res1.state, Propose(msg))
+    val res3 = process_proposal_and_quorum_after_prevote_stage_for_the_first_time(res2.state, Propose(msg))
+    {
+      state: res3.state,
+      external: res1.external.union(res2.external).union(res3.external),
+      internal: res1.internal.union(res2.internal).union(res3.internal),
+      logging: res1.logging.union(res2.logging).union(res3.logging)
+    } 
+  }
+
+
 
   pure def receive_message(s:LocalState, msg: Message): HandlerOutput =
   //apply all handlers in order
