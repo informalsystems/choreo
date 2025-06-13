@@ -1,35 +1,35 @@
 module glyph{
-    import tendermint.* from "tendermint"
-    import basicSpells.* from "lib/basicSpells"
+  import tendermint.* from "tendermint"
+  import basicSpells.* from "lib/basicSpells"
 
-    var s: Environment
+  var s: Environment // Global state of the system
 
-    pure def broadcast(env: Environment, msg: Message): Environment = 
-    { ...env, system: env.system.transformValues(s => { ...s, messages: s.messages.setAdd(msg) }) }
+  //-------------------------------- glyphs helpers --------------------------------
+  pure def broadcast(env: Environment, msg: Message): Environment = 
+  { ...env, system: env.system.transformValues(s => { ...s, messages: s.messages.setAdd(msg) }) }
 
-    pure val TIMEOUT_ORDER = Map(ProposeTimeout -> 0, PreVoteTimeout -> 1, PreCommitTimeout -> 2)
-    pure def should_replace(t1: TimeoutEvent, t2: TimeoutEvent): bool = {
-        // TODO: this won't be needed once I update the CSMI lib with the sets of timeouts
-        TIMEOUT_ORDER.get(t2.kind) < TIMEOUT_ORDER.get(t1.kind) or t2.round > t1.round
-    }
+  pure val TIMEOUT_ORDER = Map(ProposeTimeout -> 0, PreVoteTimeout -> 1, PreCommitTimeout -> 2)
+  pure def should_replace(t1: TimeoutEvent, t2: TimeoutEvent): bool = {
+      TIMEOUT_ORDER.get(t2.kind) < TIMEOUT_ORDER.get(t1.kind) or t2.round > t1.round
+  }
+  pure def timeout(env: Environment, v: Node, event: TimeoutEvent): Environment = 
+  { ...env,
+      active_timeouts: env.active_timeouts.setBy(v, old_timeout => Some({
+          match old_timeout {
+          | None => event
+          | Some(ts) => if (should_replace(ts, event)) event else ts
+          }
+      }))
+  }
 
-    pure def timeout(env: Environment, v: Node, event: TimeoutEvent): Environment = 
-    { ...env,
-        active_timeouts: env.active_timeouts.setBy(v, old_timeout => Some({
-            match old_timeout {
-            | None => event
-            | Some(ts) => if (should_replace(ts, event)) event else ts
-            }
-        }))
-    }
+  pure def bookkeep(env: Environment, f: Bookkeeping => Bookkeeping): Environment = {
+  { ...env, 
+      bookkeeping: f(env.bookkeeping)
+  }
+  }
 
-    pure def bookkeep(env: Environment, f: Bookkeeping => Bookkeeping): Environment = {
-    { ...env, 
-        bookkeeping: f(env.bookkeeping)
-    }
-    }
-
-    pure def apply_effect(
+  // -------------------------------- effect processors --------------------------------
+  pure def apply_effect(
     env: Environment,
     n: Node,
     ext: Set[ExternalEffect],
@@ -66,35 +66,36 @@ module glyph{
         }
     });
     env3
+  }
+
+  // -------------------------------- initialization --------------------------------
+  pure val initial_message =
+    Propose({ src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
+
+  pure val initial_bookkeeping = {
+    evidence_propose: Set(),
+    evidence_prevote: Set(),
+    evidence_precommit: Set(),
+    breakpoint: false,
+  }
+
+  pure def initialize_process(n: Node): LocalState = {
+    {
+    process_id: n,
+    messages: Set(initial_message),
+    round: 0,
+    stage: ProposeStage,
+    decision: None,
+    locked_value: None,
+    locked_round: -1,
+    valid_value: None,
+    valid_round: -1,
+    after_prevote_for_first_time: false,
+    precommit_quorum: false,
     }
+  }
 
-    pure val initial_message =
-        Propose({ src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
-
-    pure val initial_bookkeeping = {
-        evidence_propose: Set(),
-        evidence_prevote: Set(),
-        evidence_precommit: Set(),
-        breakpoint: false,
-    }
-
-    pure def initialize_process(n: Node): LocalState = {
-        {
-        process_id: n,
-        messages: Set(initial_message),
-        round: 0,
-        stage: ProposeStage,
-        decision: None,
-        locked_value: None,
-        locked_round: -1,
-        valid_value: None,
-        valid_round: -1,
-        after_prevote_for_first_time: false,
-        precommit_quorum: false,
-        }
-    }
-
-    val byzantine_messages = {
+  val byzantine_messages = {
     val rounds = s.system.values().map(s => s.round)
     val byzantine_proposals = rounds.map(r => {
       tuples(FAULTY, VALUES.values(), ROUNDS.setAdd(-1)).map(((f, v, vr)) => {
@@ -117,6 +118,7 @@ module glyph{
     Set(byzantine_proposals, byzantine_prevotes, byzantine_precommits).flatten()
   }
 
+  // -------------------------------- actions --------------------------------
   action init = all {
     s' = {
       system: NODES.mapBy(n => initialize_process(n)),
@@ -124,7 +126,6 @@ module glyph{
       bookkeeping: initial_bookkeeping,
     }
   }
-
 
 
   action step = {
