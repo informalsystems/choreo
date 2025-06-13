@@ -164,4 +164,10 @@ module glyph{
         )
     }
   }
+
+  val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
+  /// Agreement: no two correct full nodes decide differently.
+  val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
+    p1.decision == None or p2.decision == None or p1.decision == p2.decision
+  })
 }
