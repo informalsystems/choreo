@@ -1,4 +1,4 @@
-module tender_one{
+module tendermint{
 
   import basicSpells.* from "lib/basicSpells"
 
@@ -74,6 +74,20 @@ module tender_one{
         logging: Set[LoggingEffect],
     }
 
+    type Bookkeeping = {
+        evidence_propose: Set[ProposeMsg],
+        evidence_prevote: Set[PreVoteMsg],
+        evidence_precommit: Set[PreVoteMsg],
+        // For debugging. See README.md#using-breakpoints
+        breakpoint: bool,
+  }
+
+    type Environment = {
+        system : Node -> LocalState,
+        active_timeouts : Node -> Option[TimeoutEvent],
+        bookkeeping : Bookkeeping,
+    }
+
   type TimeoutKind = ProposeTimeout | PreVoteTimeout | PreCommitTimeout
   type TimeoutEvent = { kind: TimeoutKind, round: Round}
 
@@ -142,6 +156,39 @@ module tender_one{
   /// A value hash in an abstract way.
   pure def id(v: Value): ValueId = { hashed: v }
 
+
+pure def start_round(s: LocalState, round: Round): HandlerOutput = {
+  pure val new_s = { 
+    ...s,
+    round: round,
+    stage: ProposeStage,
+    precommit_quorum: false
+  };
+
+  if (new_s.process_id == PROPOSER.get(round)){
+    pure val proposal = if (new_s.valid_value != None) new_s.valid_value.unwrap() else VALUES.get(round);
+    { 
+      state: new_s,
+      external: Set(
+        Broadcast(
+          Propose({ src: new_s.process_id, round: new_s.round, proposal: proposal, valid_round: new_s.valid_round })
+        )
+      ),
+      internal: Set(),
+      logging: Set()
+    }
+  } else {
+    { 
+      state: new_s,
+      external: Set(),
+      internal: Set(
+        StartTimeout({ kind: ProposeTimeout, round: new_s.round })
+      ),
+      logging: Set()
+    }
+  }
+}
+
   pure def process_proposal_at_propose_stage(s: LocalState, msg: Message): HandlerOutput = {
   pure val propose_msg = match msg {
     | Propose(p) => Some(p)
@@ -167,7 +214,7 @@ module tender_one{
         state: { ...s, stage: PreVoteStage, after_prevote_for_first_time: true},
         external: Set(broadcast),
         internal: Set(),
-        logging: Set()
+        logging: Set(CollectEvidence(Propose(msg_val)))
       }
     } else 
       {state: s, external: Set(), internal: Set(), logging: Set()}
@@ -227,14 +274,13 @@ pure def process_prevote_quorum_on_prevote_stage(s: LocalState, msg: Message): H
       state: { ...s, after_prevote_for_first_time: false },
       internal: Set(StartTimeout({ kind: ProposeTimeout, round: s.round })),
       external: Set(),
-      logging: Set()
+      logging: prevotes.map(m => CollectEvidence(PreVote(m)))
     }
   } else 
     {state: s, external: Set(), internal: Set(), logging: Set()}
 }
 
 // Rewritten process_proposal_and_quorum_after_prevote_stage_for_the_first_time
-
 pure def process_proposal_and_quorum_after_prevote_stage_for_the_first_time(s: LocalState, msg: Message): HandlerOutput = {
   pure val propose_msg = match msg {
     | Propose(p) => Some(p)
@@ -358,4 +404,33 @@ pure def process_proposal_and_precommit_quorum_but_no_decision(s: LocalState, ms
       {state: s, external: Set(), internal: Set(), logging: Set()}
   }
 }
+
+pure def receive_message(s:LocalState, msg: Message): HandlerOutput =
+ //apply all handlers in order
+ val composition = Set(
+    process_proposal_at_propose_stage(s, msg),
+    process_proposal_and_quorum_at_propose_stage(s, msg),
+    process_prevote_quorum_on_prevote_stage(s, msg),
+    process_proposal_and_quorum_after_prevote_stage_for_the_first_time(s, msg),
+    process_prevote_quorum_at_prevote_stage(s, msg),
+    process_precommit_quorum_for_the_first_time(s, msg),
+    process_proposal_and_precommit_quorum_but_no_decision(s, msg)
+  )
+  // the fold should be unnecessary
+  pure val result = composition.fold({
+    state: s,
+    external: Set(),
+    internal: Set(),
+    logging: Set()
+  }, (accumulated_result, handler_output) => {
+    {
+      state: handler_output.state,
+      external: accumulated_result.external.union(handler_output.external),
+      internal: accumulated_result.internal.union(handler_output.internal),
+      logging: accumulated_result.logging.union(handler_output.logging)
+    }
+  })
+  result
 }
+
+
