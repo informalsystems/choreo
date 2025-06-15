@@ -165,6 +165,22 @@ module glyph{
     }
   }
 
+  action step_slow = {
+    nondet process = NODES.oneOf()
+    val msgs = s.system.get(process).messages
+    nondet message = msgs.oneOf()
+    val message_result = receive_message(s.system.get(process), message)
+    all {
+      s' = apply_effect(
+        { ...s, system: s.system.set(process, message_result.state) },
+        process,
+        message_result.external,
+        message_result.internal,
+        message_result.logging
+      )
+    }
+  }
+
   val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
   /// Agreement: no two correct full nodes decide differently.
   val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {

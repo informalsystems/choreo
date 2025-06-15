@@ -1,12 +1,245 @@
 // -*- mode: Bluespec; -*-
 
 module tendermint {
-  import CSMIBase as CSMI from "lib/csmi"
-  import CSMIBase.and_then from "lib/csmi"
-  import CSMIBase.and_then_state from "lib/csmi"
-  import CSMIState(processes = NODES) as CSMI from "lib/csmi"
+  
 
   import basicSpells.* from "lib/basicSpells"
+
+  // ----------------------------------------------------------------------------------
+  // ------------------------------CSMI BASE ------------------------------------------------
+  type LocalState= {
+    process_id: Node,
+    messages: Set[Message],
+    round: Round,
+    stage: Stage,
+    decision: Option[Value],
+    locked_value: Option[Value],
+    locked_round: Round,
+    valid_value: Option[Value],
+    valid_round: Round,
+    after_prevote_for_first_time: bool,
+    precommit_quorum: bool,
+  }
+
+  type ConsensusResult = {
+    output: Set[ConsensusOutput],
+    state: LocalState,
+  }
+  type UponResult = Option[ConsensusResult]
+
+type TimeoutEvent = { kind: TimeoutKind, round: Round }
+
+
+  type Environment = {
+    system: Node -> LocalState,
+    activeTimeouts: Node -> Option[TimeoutEvent],
+    bookkeeping: Bookkeeping
+  }
+
+  type ReceiveMessage = (LocalState, Message) => Set[UponResult]
+
+  type ApplyEffect =
+    (Environment, Node, Set[ConsensusOutput]) => Environment
+
+  type FireTimeoutEvent = (LocalState, TimeoutEvent) => ConsensusResult
+
+  pure def bookkeep(env: Environment, f: Bookkeeping => Bookkeeping): Environment = {
+    { ...env, bookkeeping: f(env.bookkeeping) }
+  }
+
+  pure def broadcast(env: Environment, msg: Message): Environment = {
+    { ...env, system: env.system.transformValues(s => { ...s, messages: s.messages.setAdd(msg) }) }
+  }
+
+  pure def timeout(
+    env: Environment,
+    v: Node,
+    timeout: TimeoutEvent,
+    should_replace: (TimeoutEvent, TimeoutEvent) => bool
+  ): Environment = {
+    { ...env,
+      activeTimeouts: env.activeTimeouts.setBy(v, old_timeout => Some({
+        match old_timeout {
+          | None => timeout
+          | Some(ts) => if (should_replace(ts, timeout)) timeout else ts
+        }
+      }))
+    }
+  }
+
+  pure def update_state(
+    env: Environment,
+    v: Node,
+    res: ConsensusResult,
+    apply_effect: ApplyEffect
+  ): Environment = {
+    val new = { ... env, system: env.system.set(v, res.state) }
+    apply_effect(new, v, res.output)
+  }
+
+  pure def and_then(
+    res: ConsensusResult,
+    f: (LocalState) => ConsensusResult
+  ): ConsensusResult = {
+    pure val new_res = f(res.state)
+    join_results(res, new_res)
+  }
+
+  pure def and_then_state(
+    state: LocalState,
+    f: (LocalState) => r
+  ): r = {
+    f(state)
+  }
+
+  pure def join_results(
+    res1: ConsensusResult,
+    res2: ConsensusResult
+  ): ConsensusResult = {
+    { state: res2.state, output: res1.output.union(res2.output) }
+  }
+
+  pure def no_output(s: LocalState): ConsensusResult = {
+    { state: s, output: Set() }
+  }
+
+  pure def upon(condition: bool, transition: (bool) => ConsensusResult): UponResult = {
+    if (condition)
+      Some(transition(true))
+    else
+      None
+  }
+
+
+  // ----------------------------------------------------------------------------------
+  // ------------------------------CSMI STATE ------------------------------------------------
+  const processes: Set[p]
+  var s: Environment
+
+  // This specification is event triggered, so a process step can only be triggered by a message or a timeout
+  // as a result we need either messages or timeouts in the initial state
+  action init0(
+    initialize_process: (Node) => LocalState,
+    initial_bookkeeping: Bookkeeping
+  ): bool = all {
+    s' = {
+      system: processes.mapBy(v => initialize_process(v)),
+      activeTimeouts: processes.mapBy(v => None),
+      bookkeeping: initial_bookkeeping,
+    }
+  }
+
+  //
+  // Standard interleaving semantics (one process receives one message/timeout in one action)
+  //
+
+  action receive_one_message(
+    env: Environment,
+    v: Node,
+    msg: Message,
+    receive_message: ReceiveMessage,
+    apply_effect: ApplyEffect,
+  ): bool = {
+    nondet res = env.system.get(v).receive_message(msg).oneOf()
+    all {
+      // Pre-condition: only make a transition if the condition held true
+      // (that is, the "upon" condition - as `upon` will return None if the
+      // condition does not hold).
+      res != None,
+      s' = update_state(env, v, res.unwrap(), apply_effect)
+    }
+  }
+
+  pure def fire_one_timeout_event(
+    env: Environment,
+    v: Node,
+    timeout: TimeoutEvent,
+    fire_timeout_event: FireTimeoutEvent,
+    apply_effect: ApplyEffect
+  ): Environment = {
+    val consumed_timeout_env = {
+      ...env,
+      activeTimeouts: env.activeTimeouts.set(v, None)
+    }
+    val res = consumed_timeout_env.system.get(v).fire_timeout_event(timeout)
+    update_state(consumed_timeout_env, v, res, apply_effect)
+  }
+
+  action receive_msg(
+    v: Node,
+    msg: Message ,
+    receive_message: ReceiveMessage,
+    apply_effect: ApplyEffect
+  ): bool = all {
+    s.system.get(v).messages.contains(msg),
+    receive_one_message(s, v, msg, receive_message, apply_effect)
+  }
+
+  action receive_some_msg(
+    v: Node,
+    receive_message: ReceiveMessage,
+    apply_effect: ApplyEffect
+  ): bool = all {
+    // s.msgBuffer.get(v) != Set(),
+    nondet msg = oneOf(s.system.get(v).messages)
+    receive_msg(v, msg, receive_message, apply_effect)
+  }
+
+  action fire_timeout(
+    v: Node,
+    fire_timeout_event: FireTimeoutEvent,
+    apply_effect: ApplyEffect
+  ): bool = {
+     val timeout = s.activeTimeouts.get(v)
+     all {
+       timeout != None,
+       s' = fire_one_timeout_event(s, v, timeout.unwrap(), fire_timeout_event, apply_effect),
+     }
+  }
+
+  action step0(
+    receive_message: ReceiveMessage,
+    fire_timeout_event: FireTimeoutEvent,
+    apply_effect: ApplyEffect,
+    byzantine_messages: Set[Message],
+    timeout_chance: int // between 0 and 100
+  ): bool = any {
+    all {
+      nondet timeout_frequency_control = 1.to(100).oneOf()
+      or {
+        // s.msgBuffer.values().flatten() == Set(),
+        timeout_frequency_control <= timeout_chance,
+      },
+      s.activeTimeouts.values().exists(t => t != None),
+      // pick a process that has an active timeout
+      nondet v = oneOf(processes.filter(v => s.activeTimeouts.get(v) != None))
+      fire_timeout(v, fire_timeout_event, apply_effect)
+    },
+    all {
+      // s.msgBuffer.values().flatten() != Set(),
+      // pick a process that has a message available in its buffer
+      nondet v = oneOf(processes.filter(v => s.system.get(v).messages != Set()))
+      receive_some_msg(v, receive_message, apply_effect)
+    },
+    all {
+      // byzantine_messages != Set(),
+      nondet msg = oneOf(byzantine_messages)
+      // Workaround weird effect bug if we don't use `s` here
+      nondet v = oneOf(processes.filter(v => s.system.keys() != Set()))
+      receive_one_message(s, v, msg, receive_message, apply_effect)
+    },
+  }
+
+  action step_no_timeout0(
+    receive_message: ReceiveMessage,
+    apply_effect: ApplyEffect
+  ): bool = all {
+    // s.msgBuffer.values().flatten() != Set(),
+    // pick a process that has a message available in its buffer
+    nondet v = oneOf(processes.filter(v => s.system.get(v).messages != Set()))
+    receive_some_msg(v, receive_message, apply_effect)
+  }
+// ----------------------------------------------------------------------------------
 
   type Round = int
   type Stage = ProposeStage | PreVoteStage | PreCommitStage | DecidedStage
@@ -54,7 +287,6 @@ module tendermint {
     | Breakpoint
 
   type TimeoutKind = ProposeTimeout | PreVoteTimeout | PreCommitTimeout
-  type TimeoutEvent = { kind: TimeoutKind, round: Round }
 
   type Bookkeeping = {
     evidence_propose: Set[ProposeMsg],
@@ -65,10 +297,10 @@ module tendermint {
   }
 
   // Instantiate the CSMI types
-  type LocalState = CSMI::LocalState[Node, Message, State]
-  type ConsensusResult = CSMI::ConsensusResult[LocalState, ConsensusOutput]
-  type UponResult = CSMI::UponResult[LocalState, ConsensusOutput]
-  type Environment = CSMI::Environment[Node, State, Message, TimeoutEvent, Bookkeeping]
+  //type LocalState = LocalState0[Node, Message, State]
+  //type ConsensusResult = ConsensusResult0[LocalState, ConsensusOutput]
+  //type UponResult = UponResult0[LocalState, ConsensusOutput]
+  //type Environment = Environment0[Node, State, Message, TimeoutEvent, Bookkeeping]
 
   /* CONSTANTS */
 
@@ -187,9 +419,9 @@ module tendermint {
       s.stage == ProposeStage,
     }
 
-   CSMI::upon(upon_condition, (a) => {
+   upon(upon_condition, (a) => {
      pure val broadcast =
-       if (msg.proposal.valid() and (s.locked_round == -1 or s.locked_value == msg.proposal))
+       if (msg.proposal.valid() and (s.locked_round == -1 or s.locked_value == Some(msg.proposal)))
          Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(msg.proposal.id()) }))
        else
          Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))
@@ -232,16 +464,16 @@ module tendermint {
         msg.valid_round >= 0 and msg.valid_round < s.round,
       }
 
-   CSMI::upon(upon_condition, (a) => {
+   upon(upon_condition, (a) => {
      pure val broadcast =
-       if (msg.proposal.valid() and (s.locked_round <= msg.valid_round or s.locked_value == msg.proposal))
+       if (msg.proposal.valid() and (s.locked_round <= msg.valid_round or s.locked_value == Some(msg.proposal)))
          Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(msg.proposal.id()) }))
        else
          Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))
 
      {
        state: { ...s, stage: PreVoteStage, after_prevote_for_first_time: true },
-       output: Set(broadcast, CollectEvidence(Propose(msg)), Breakpoint)
+       output: Set(broadcast, CollectEvidence(Propose(msg)))
          .union(prevotes.map(m => CollectEvidence(PreVote(m))))
      }
    })
@@ -262,7 +494,7 @@ module tendermint {
       s.stage == PreVoteStage and s.after_prevote_for_first_time,
     }
 
-    CSMI::upon(upon_condition, (a) => {
+    upon(upon_condition, (a) => {
       {
         state: { ...s, after_prevote_for_first_time: false },
         output: Set(StartTimeout({ kind: PreVoteTimeout, round: s.round })) // msg.get_round()?
@@ -299,7 +531,7 @@ module tendermint {
       s.stage.in(Set(PreVoteStage, PreCommitStage)) and s.after_prevote_for_first_time,
     }
 
-    CSMI::upon(upon_condition, (a) => {
+    upon(upon_condition, (a) => {
       pure val base_result = {
         state: {
           ...s,
@@ -324,7 +556,7 @@ module tendermint {
             )
           }
         } else {
-          CSMI::no_output(s)
+          no_output(s)
         }
       })
     })
@@ -345,7 +577,7 @@ module tendermint {
       s.stage == PreVoteStage,
     }
 
-    CSMI::upon(upon_condition, (a) => {
+    upon(upon_condition, (a) => {
       state: { ...s, stage: PreCommitStage },
       output: Set(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
         .union(prevotes.map(m => CollectEvidence(PreVote(m))))
@@ -366,7 +598,7 @@ module tendermint {
       not(s.precommit_quorum),
     }
 
-    CSMI::upon(upon_condition, (a) => {
+    upon(upon_condition, (a) => {
       state: { ...s, precommit_quorum: true },
       output: Set(StartTimeout({ kind: PreCommitTimeout, round: s.round }))
         .union(precommits.map(m => CollectEvidence(PreCommit(m))))
@@ -395,8 +627,8 @@ module tendermint {
       s.decision == None,
     }
 
-    CSMI::upon(upon_condition, (a) => {
-      if (not(msg.proposal.valid())) CSMI::no_output(s) else
+    upon(upon_condition, (a) => {
+      if (not(msg.proposal.valid())) no_output(s) else
 
       {
         state: {
@@ -450,7 +682,7 @@ module tendermint {
     match t.kind {
       | ProposeTimeout => {
         // line 55
-        if (s.round != t.round or s.stage != ProposeStage) CSMI::no_output(s) else
+        if (s.round != t.round or s.stage != ProposeStage) no_output(s) else
 
         {
           state: { ...s, stage: PreVoteStage },
@@ -459,7 +691,7 @@ module tendermint {
       }
       | PreVoteTimeout => {
         // line 61
-        if (s.round != t.round or s.stage != PreVoteStage) CSMI::no_output(s) else
+        if (s.round != t.round or s.stage != PreVoteStage) no_output(s) else
 
         {
           state: { ...s, stage: PreCommitStage },
@@ -468,7 +700,7 @@ module tendermint {
       }
       | PreCommitTimeout => {
         // line 65
-        if (s.round != t.round) CSMI::no_output(s) else
+        if (s.round != t.round) no_output(s) else
 
         s.start_round(s.round + 1)
       }
@@ -484,10 +716,10 @@ module tendermint {
   pure def apply_effect(env: Environment, n: Node, outputs: Set[ConsensusOutput]): Environment = {
     outputs.fold(env, (env, output) => {
       match output {
-        | Broadcast(msg) => CSMI::broadcast(env, msg)
-        | StartTimeout(r) => CSMI::timeout(env, n, r, should_replace)
+        | Broadcast(msg) => broadcast(env, msg)
+        | StartTimeout(r) => timeout(env, n, r, should_replace)
         | CollectEvidence(msg) => {
-          CSMI::bookkeep(env, b => {
+          bookkeep(env, b => {
             match msg {
               | Propose(p) => { ...b, evidence_propose: b.evidence_propose.setAdd(p) }
               | PreVote(p) => { ...b, evidence_prevote: b.evidence_prevote.setAdd(p) }
@@ -496,7 +728,7 @@ module tendermint {
           })
         }
         | Breakpoint => {
-          CSMI::bookkeep(env, b => { ...b, breakpoint: true })
+          bookkeep(env, b => { ...b, breakpoint: true })
         }
       }
     })
@@ -513,7 +745,7 @@ module tendermint {
   }
 
   val byzantine_messages = {
-    val rounds = CSMI::s.system.values().map(s => s.round)
+    val rounds = s.system.values().map(s => s.round)
     val byzantine_proposals = rounds.map(r => {
       tuples(FAULTY, VALUES.values(), ROUNDS.setAdd(-1)).map(((f, v, vr)) => {
         Propose({ src: f, round: r, proposal: v, valid_round: vr })
@@ -535,9 +767,9 @@ module tendermint {
     Set(byzantine_proposals, byzantine_prevotes, byzantine_precommits).flatten()
   }
 
-  action init = CSMI::init(initialize_process, initial_bookkeeping)
-  action step = CSMI::step(receive_message, fire_timeout_event, apply_effect, byzantine_messages, 20)
-  action step_no_timeout = CSMI::step_no_timeout(receive_message, apply_effect)
+  action init = init0(initialize_process, initial_bookkeeping)
+  action step = step0(receive_message, fire_timeout_event, apply_effect, byzantine_messages, 20)
+  action step_no_timeout = step_no_timeout0(receive_message, apply_effect)
 
   /* FORK SCENARIOS */
 
@@ -550,26 +782,27 @@ module tendermint {
   /// Equivocation by a node n
   def equivocation_by(n: Node): bool = {
     or {
-      n.equivocation_in(CSMI::s.bookkeeping.evidence_propose),
-      n.equivocation_in(CSMI::s.bookkeeping.evidence_prevote),
-      n.equivocation_in(CSMI::s.bookkeeping.evidence_precommit),
+      n.equivocation_in(s.bookkeeping.evidence_propose),
+      n.equivocation_in(s.bookkeeping.evidence_prevote),
+      n.equivocation_in(s.bookkeeping.evidence_precommit),
     }
   }
 
   /// Amnesic behavior by a node n
+  /*
   def amnesia_by(n: Node): bool = {
     tuples(ROUNDS, ROUNDS).exists(((r1, r2)) => {
       r1 < r2 and tuples(VALID_VALUES, VALID_VALUES).exists(((v1, v2)) => {
         and {
           v1 != v2,
-          CSMI::s.bookkeeping.evidence_propose.contains({
+          s.bookkeeping.evidence_propose.contains({
             { src: n, round: r1, proposal: v1.id(), valid_round: r1 }
           }),
-          CSMI::s.bookkeeping.evidence_propose.contains({
+          s.bookkeeping.evidence_propose.contains({
             { src: n, round: r2, proposal: v2.id(), valid_round: r2 }
           }),
           ROUNDS.filter(r => r1 <= r and r < r2).forall(r => {
-            CSMI::s.bookkeeping.evidence_prevote.filter(m => {
+            s.bookkeeping.evidence_prevote.filter(m => {
               m.round == r and m.id == v2.id()
             }).size() >= 2 * F + 1
           }),
@@ -577,16 +810,21 @@ module tendermint {
       })
     })
   }
+  */
+    def amnesia_by(n: Node): bool = {
+        // Amnesia is not implemented yet, so we return false.
+        false
+    }
 
   /* PROPERTIES */
 
   /// Sanity check for decisions
-  val no_decision = CSMI::s.system.values().forall(v => v.decision == None)
+  val no_decision = s.system.values().forall(v => v.decision == None)
 
   /// Invariant for debugging. See README.md#using-breakpoints
-  val breakpoint = not(CSMI::s.bookkeeping.breakpoint)
+  val breakpoint = not(s.bookkeeping.breakpoint)
 
-  val correct_nodes = CSMI::s.system.values().filter(s => s.process_id.in(CORRECT))
+  val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
 
   /// Agreement: no two correct full nodes decide differently.
   val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
@@ -611,6 +849,7 @@ module tendermint {
 module tendermint_valid {
   import tendermint(
     F = 1,
+    processes = Set("p1", "p2", "p3", "p4"),
     CORRECT = Set("p1", "p2", "p3"),
     FAULTY = Set("p4"),
     PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1"),
@@ -618,12 +857,4 @@ module tendermint_valid {
   ).*
 }
 
-module tendermint_faulty {
-  import tendermint(
-    F = 1,
-    CORRECT = Set("p1", "p2"),
-    FAULTY = Set("p3", "p4"),
-    PROPOSER = Map(0 -> "p3", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1"),
-    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0"),
-  ).*
-}
+

@@ -363,7 +363,7 @@ module tendermint{
         },
         logging: Set(CollectEvidence(Propose(msg)))
           .union(precommits.map(m => CollectEvidence(PreCommit(m)))),
-        external: Set(),
+        external: Set(),//Set(Decided),
         internal: Set()
         // TODO Send start round msg to reset
       }
@@ -602,6 +602,22 @@ module tendermint{
             result.internal,
             result.logging
         )
+    }
+  }
+
+  action step_slow = {
+    nondet process = NODES.oneOf()
+    val msgs = s.system.get(process).messages
+    nondet message = msgs.oneOf()
+    val message_result = receive_message(s.system.get(process), message)
+    all {
+      s' = apply_effect(
+        { ...s, system: s.system.set(process, message_result.state) },
+        process,
+        message_result.external,
+        message_result.internal,
+        message_result.logging
+      )
     }
   }
 
