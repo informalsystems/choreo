@@ -371,14 +371,6 @@ module basicSpells {
     assert(setByWithDefault(Map(1 -> 2, 2 -> 3), 3, x => x + 1, 0) == Map(1 -> 2, 2 -> 3, 3 -> 1)),
   }
 
-  //// Returns a set of the elements in the list.
-  ////
-  //// - @param list a list
-  //// - @returns a set of the elements in list
-  pure def toSet(list: List[a]): Set[a] = {
-      list.foldl(Set(), (s, e) => s.union(Set(e)))
-  }
-
   pure def unwrap(value: Option[a]): a = {
     match value {
       | None => Map().get(value)

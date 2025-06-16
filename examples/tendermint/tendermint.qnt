@@ -1,6 +1,7 @@
 module tendermint{
 
   import basicSpells.* from "lib/basicSpells"
+  import rareSpells.* from "lib/rareSpells"
 
   type Round = int
   type Stage = ProposeStage | PreVoteStage | PreCommitStage | DecidedStage
@@ -598,10 +599,16 @@ module tendermint{
 
 
   action step = {
-    nondet process = NODES.oneOf()
-    val msgs = s.system.get(process).messages
+    val all_msgs = s.system.keys().map(n => s.system.get(n).messages.map(m => { destinatary: n, content: m })).flatten()
+    nondet ordered_messages = setOfMaps(all_msgs, 1.to(all_msgs.size())).oneOf()
+    // Make `process` depend on `ordered_messages` so it get's picked (and retried) after it
+    nondet process = ordered_messages.keys().map(k => k.destinatary).oneOf()
+    val messages = ordered_messages.keys()
+      .toList((a, b) => intCompare(ordered_messages.get(a), ordered_messages.get(b)))
+      .select(m => m.destinatary == process)
+      .listMap(m => m.content)
     val initial = { state: s.system.get(process), external: Set(), internal: Set(), logging: Set() }
-    val result = msgs.fold(initial, (accumulated_result, message) => {
+    val result = messages.foldl(initial, (accumulated_result, message) => {
       // Stop after finding the first effect
       if (accumulated_result.external != Set()) accumulated_result 
       else{
@@ -652,12 +659,15 @@ module tendermint{
     }
   }
 
+
   val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
   /// Agreement: no two correct full nodes decide differently.
   val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
     p1.decision == None or p2.decision == None or p1.decision == p2.decision
   })
 
+  // Witness
+  val no_decision = correct_nodes.forall(n => n.decision == None)
 
   /* CONSTANTS */
   /// An upper bound on the number of Byzantine processes
