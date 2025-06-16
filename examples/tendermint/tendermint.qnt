@@ -23,6 +23,7 @@ module tendermint{
     precommit_quorum: bool,
     messages: Set[Message],
     process_id : Node,
+    decisions: Round -> Option[Value],
   }
 
   type ProposeMsg = {
@@ -150,6 +151,7 @@ module tendermint{
   // -------------------------------------------------------- New Logic ------------------------------------------------------------
 
   pure def start_round(s: LocalState, round: Round): HandlerOutput = {
+    if (round > MAX_ROUND) no_effects(s) else
     pure val s1 = { 
       ...s,
       round: round,
@@ -352,7 +354,10 @@ module tendermint{
     }
     if (not(upon_condition)) no_effects(s) else
     if (not(msg.proposal.valid())) no_effects(s) else
-      {
+
+      pure val s1 = {...s, decisions: s.decisions.put(msg.round, Some(msg.proposal))}
+      pure val ho = start_round(s1, s1.round + 1)
+      /*{
         state: {
           ...s,
           decision: Some(msg.proposal),
@@ -366,6 +371,14 @@ module tendermint{
         external: Set(),//Set(Decided),
         internal: Set()
         // TODO Send start round msg to reset
+      }
+      */
+      {
+        state: ho.state,
+        external: ho.external,
+        internal: ho.internal,
+        logging: ho.logging.union(Set(CollectEvidence(Propose(msg)))
+          .union(precommits.map(m => CollectEvidence(PreCommit(m)))))
       }
   }
 
@@ -388,6 +401,21 @@ module tendermint{
     proposals.fold(no_effects(s), (acc, msg) => {
       process_proposal_and_precommit_quorum_but_no_decision(acc.state, msg)
     })
+  }
+
+  pure def reset_state(s: LocalState): LocalState = {
+    {
+      ...s,
+      round: s.round,
+      stage: ProposeStage,
+      decision: None,
+      locked_value: None,
+      locked_round: -1,
+      valid_value: None,
+      valid_round: -1,
+      after_prevote_for_first_time: false,
+      precommit_quorum: false,
+    }
   }
 
   // -------------------------------------------------------- Message Handlers ------------------------------------------------------------
@@ -532,6 +560,7 @@ module tendermint{
     valid_round: -1,
     after_prevote_for_first_time: false,
     precommit_quorum: false,
+    decisions: Map(),
     }
   }
 
@@ -610,7 +639,9 @@ module tendermint{
     val msgs = s.system.get(process).messages
     nondet message = msgs.oneOf()
     val message_result = receive_message(s.system.get(process), message)
+    //val message_result_ex = {...message_result, state: {...message_result.state, messages: message_result.state.messages.exclude(Set(message))}}
     all {
+      s.system.values().map(s=>s.round).forall(r => r <= MAX_ROUND), // only for this draft, as I want a finite state space
       s' = apply_effect(
         { ...s, system: s.system.set(process, message_result.state) },
         process,
@@ -640,6 +671,7 @@ module tendermint{
   /// Which value is proposed in each round.
   /// Values from rounds with correct nodes (in PROPOSER) are considered valid values.
   const VALUES: Round -> Value
+  const MAX_ROUND: Round // The maximum round we want to simulate
 
   /// The set of all nodes
   pure val NODES = CORRECT.union(FAULTY)
@@ -655,8 +687,9 @@ module test{
     F = 1,
     CORRECT = Set("p1", "p2", "p3"),
     FAULTY = Set("p4"),
-    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1"),
-    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0"),
+    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "None", 5-> "None", 6 -> "None"),
+    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0", 5 -> "v1"),
+    MAX_ROUND = 1
   ).*
 }
 

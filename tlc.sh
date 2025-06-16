@@ -172,8 +172,13 @@ process_file() {
     # Step 2: Create .cfg file with `q_inv` and `q_temporalProps`
     create_cfg_file "$cfg_file"
 
+    # measure time for model checking
+    start_time=$(date +%s%3N)
     # Step 3: Run model checker
     run_tlc "$tla_file"
+    end_time=$(date +%s%3N)
+    elapsed_time=$((end_time - start_time))
+    info "Model checking took $((elapsed_time)) ms"
 
     # Step 4: Cleanup
     rm -f "$tla_file" "$cfg_file"
