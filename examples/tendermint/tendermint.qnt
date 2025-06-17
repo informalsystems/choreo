@@ -599,16 +599,21 @@ module tendermint{
 
 
   action step = {
-    val all_msgs = s.system.keys().map(n => s.system.get(n).messages.map(m => { destinatary: n, content: m })).flatten()
-    nondet ordered_messages = setOfMaps(all_msgs, 1.to(all_msgs.size())).oneOf()
-    // Make `process` depend on `ordered_messages` so it get's picked (and retried) after it
-    nondet process = ordered_messages.keys().map(k => k.destinatary).oneOf()
-    val messages = ordered_messages.keys()
-      .toList((a, b) => intCompare(ordered_messages.get(a), ordered_messages.get(b)))
-      .select(m => m.destinatary == process)
-      .listMap(m => m.content)
+    nondet process = NODES.oneOf()
+    val all_msgs = s.system.get(process).messages
+    val idxs = 1.to(all_msgs.size())
+    val msgs_maps = setOfMaps(idxs, all_msgs).filter(m => tuples(idxs, idxs).forall(((i, j)) => i != j implies m.get(i) != m.get(j)))
+    val msgs_lists = msgs_maps.map(m => {
+      range(1, all_msgs.size() + 1).foldl([], (acc, i) => {
+        if (acc != []) acc.append(m.get(i)) else
+        val state = s.system.get(process)
+        val result = receive_message(state, m.get(i))
+        if (result.state != state) acc.append(m.get(i)) else acc
+      })
+    })
+    nondet ordered_messages = msgs_lists.oneOf()
     val initial = { state: s.system.get(process), external: Set(), internal: Set(), logging: Set() }
-    val result = messages.foldl(initial, (accumulated_result, message) => {
+    val result = ordered_messages.foldl(initial, (accumulated_result, message) => {
       // Stop after finding the first effect
       if (accumulated_result.external != Set()) accumulated_result 
       else{
