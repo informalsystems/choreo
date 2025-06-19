@@ -4,6 +4,7 @@ module tendermint{
   import rareSpells.* from "lib/rareSpells"
 
   type Round = int
+  type Height = int
   type Stage = ProposeStage | PreVoteStage | PreCommitStage | DecidedStage
   type Value = str
   /// The ID of a value. In the implementation, this would be a hash of the value.
@@ -47,6 +48,7 @@ module tendermint{
 
   type ExternalEffect =
     | Broadcast(Message)
+    | Finalize
 
   type InternalEffect=
     | StartTimeout(TimeoutEvent)
@@ -152,7 +154,7 @@ module tendermint{
   // -------------------------------------------------------- New Logic ------------------------------------------------------------
 
   pure def start_round(s: LocalState, round: Round): HandlerOutput = {
-    if (round > MAX_ROUND) no_effects(s) else
+    //if (round > MAX_ROUND) no_effects(s) else
     pure val s1 = { 
       ...s,
       round: round,
@@ -356,9 +358,10 @@ module tendermint{
     if (not(upon_condition)) no_effects(s) else
     if (not(msg.proposal.valid())) no_effects(s) else
 
-      pure val s1 = {...s, decisions: s.decisions.put(msg.round, Some(msg.proposal))}
-      pure val ho = start_round(s1, s1.round + 1)
-      /*{
+      //pure val s1 = {...s, decisions: s.decisions.put(msg.round, Some(msg.proposal))}
+      //pure val s2 = reset_state(s1)
+      //pure val ho = start_round(s2, s1.round + 1)
+      {
         state: {
           ...s,
           decision: Some(msg.proposal),
@@ -369,11 +372,11 @@ module tendermint{
         },
         logging: Set(CollectEvidence(Propose(msg)))
           .union(precommits.map(m => CollectEvidence(PreCommit(m)))),
-        external: Set(),//Set(Decided),
+        external: Set(Finalize),//Set(Decided),
         internal: Set()
         // TODO Send start round msg to reset
       }
-      */
+      /*
       {
         state: ho.state,
         external: ho.external,
@@ -381,18 +384,19 @@ module tendermint{
         logging: ho.logging.union(Set(CollectEvidence(Propose(msg)))
           .union(precommits.map(m => CollectEvidence(PreCommit(m)))))
       }
+      */
   }
 
   pure def on_prevote_quorum(s: LocalState): HandlerOutput ={
     pure val proposals = s.get_proposals()
     proposals.fold(no_effects(s), (acc, msg) => {
-      pure val res1 = process_proposal_at_propose_stage(acc.state, msg)
+      pure val res1 = process_proposal_and_quorum_at_propose_stage(acc.state, msg)
       pure val res2 = process_proposal_and_quorum_after_prevote_stage_for_the_first_time(res1.state, msg)
       {
         state: res2.state,
-        external: res1.external.union(res2.external),
-        internal: res1.internal.union(res2.internal),
-        logging: res1.logging.union(res2.logging)}
+        external: acc.external.union(res1.external).union(res2.external),
+        internal: acc.internal.union(res1.internal).union(res2.internal),
+        logging: acc.logging.union(res1.logging).union(res2.logging)}
       }  
     )
   }
@@ -400,14 +404,19 @@ module tendermint{
   pure def on_precommit_quorum(s: LocalState): HandlerOutput = {
     pure val proposals = s.get_proposals()
     proposals.fold(no_effects(s), (acc, msg) => {
-      process_proposal_and_precommit_quorum_but_no_decision(acc.state, msg)
+      pure val res = process_proposal_and_precommit_quorum_but_no_decision(acc.state, msg)
+      {
+        state: res.state,
+        external: acc.external.union(res.external),
+        internal: acc.internal.union(res.internal),
+        logging: acc.logging.union(res.logging)
+      }
     })
   }
 
   pure def reset_state(s: LocalState): LocalState = {
     {
       ...s,
-      round: s.round,
       stage: ProposeStage,
       decision: None,
       locked_value: None,
@@ -509,6 +518,7 @@ module tendermint{
     val env1 = ext.fold(env, (env, effect) => {
         match effect {
         | Broadcast(msg) => broadcast(env, msg)
+        | Finalize => env // Finalize is a no-op in this model
         }
     });
     
@@ -539,7 +549,7 @@ module tendermint{
 
   // -------------------------------- initialization --------------------------------
   pure val initial_message =
-    Propose({ src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
+    Propose({src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
 
   pure val initial_bookkeeping = {
     evidence_propose: Set(),
@@ -551,7 +561,7 @@ module tendermint{
   pure def initialize_process(n: Node): LocalState = {
     {
     process_id: n,
-    messages: Set(initial_message),
+    messages: Set(initial_message),//.union(byzantine_messages),
     round: 0,
     stage: ProposeStage,
     decision: None,
@@ -561,12 +571,12 @@ module tendermint{
     valid_round: -1,
     after_prevote_for_first_time: false,
     precommit_quorum: false,
-    decisions: Map(),
+    decisions: Map(0 -> None, 1 -> None, 2 -> None, 3 -> None, 4 -> None, 5 -> None, 6 -> None),
     }
   }
 
   val byzantine_messages = {
-    val rounds = s.system.values().map(s => s.round)
+    val rounds = Set (0) //s.system.values().map(s => s.round)
     val byzantine_proposals = rounds.map(r => {
       tuples(FAULTY, VALUES.values(), ROUNDS.setAdd(-1)).map(((f, v, vr)) => {
         Propose({ src: f, round: r, proposal: v, valid_round: vr })
@@ -585,7 +595,8 @@ module tendermint{
       })
     }).flatten()
 
-    Set(byzantine_proposals, byzantine_prevotes, byzantine_precommits).flatten()
+    // Reintegrate byzantine proposals
+    Set(byzantine_prevotes, byzantine_precommits, byzantine_proposals).flatten()
   }
 
   // -------------------------------- actions --------------------------------
@@ -598,17 +609,22 @@ module tendermint{
   }
 
 
-  action step = {
-    val all_msgs = s.system.keys().map(n => s.system.get(n).messages.map(m => { destinatary: n, content: m })).flatten()
-    nondet ordered_messages = setOfMaps(all_msgs, 1.to(all_msgs.size())).oneOf()
-    // Make `process` depend on `ordered_messages` so it get's picked (and retried) after it
-    nondet process = ordered_messages.keys().map(k => k.destinatary).oneOf()
-    val messages = ordered_messages.keys()
-      .toList((a, b) => intCompare(ordered_messages.get(a), ordered_messages.get(b)))
-      .select(m => m.destinatary == process)
-      .listMap(m => m.content)
+  action step_permutations = {
+    nondet process = NODES.oneOf()
+    val all_msgs = s.system.get(process).messages.union(byzantine_messages)
+    val idxs = 1.to(all_msgs.size())
+    val msgs_maps = setOfMaps(idxs, all_msgs).filter(m => tuples(idxs, idxs).forall(((i, j)) => i != j implies m.get(i) != m.get(j)))
+    val msgs_lists = msgs_maps.map(m => {
+      range(1, all_msgs.size() + 1).foldl([], (acc, i) => {
+        if (acc != []) acc.append(m.get(i)) else
+        val state = s.system.get(process)
+        val result = receive_message(state, m.get(i))
+        if (result.state != state) acc.append(m.get(i)) else acc
+      })
+    })
+    nondet ordered_messages = msgs_lists.oneOf()
     val initial = { state: s.system.get(process), external: Set(), internal: Set(), logging: Set() }
-    val result = messages.foldl(initial, (accumulated_result, message) => {
+    val result = ordered_messages.foldl(initial, (accumulated_result, message) => {
       // Stop after finding the first effect
       if (accumulated_result.external != Set()) accumulated_result 
       else{
@@ -641,14 +657,52 @@ module tendermint{
     }
   }
 
-  action step_slow = {
+
+  action step_accelerated = {
+    nondet process = CORRECT.oneOf()
+    val msgs = s.system.get(process).messages.union(byzantine_messages)
+    val initial = { state: s.system.get(process), external: Set(), internal: Set(), logging: Set() }
+    val all_pos = msgs.powerset().filter(m => m.size() > 0)
+    nondet msgs2 =  all_pos.oneOf()
+    val result = msgs2.fold(initial, (accumulated_result, message) => {
+      // Stop after finding the first effect
+      if (accumulated_result.external != Set()) accumulated_result 
+      else{
+        val internal = accumulated_result.internal
+        val external = accumulated_result.external
+        val logging = accumulated_result.logging
+        // accumulate the effects of the message
+        val message_result = receive_message(accumulated_result.state, message)
+        {
+          state: message_result.state,
+          external: external.union(message_result.external),
+          internal: internal.union(message_result.internal),
+          logging: logging.union(message_result.logging)
+        }
+        //accumulated_result.state.receive_message(message)
+      }
+    })
+    all{
+        result.external != Set(),
+        // apply the effects to the environment
+        val new_system = s.system.set(process, result.state)
+        val new_env = {...s, system: new_system}
+        s' = apply_effect(
+            new_env,
+            process,
+            result.external,
+            result.internal,
+            result.logging
+        )
+    }
+  }
+  action step_one_message = {
     nondet process = NODES.oneOf()
-    val msgs = s.system.get(process).messages
+    val msgs = s.system.get(process).messages.union(byzantine_messages)
     nondet message = msgs.oneOf()
     val message_result = receive_message(s.system.get(process), message)
-    //val message_result_ex = {...message_result, state: {...message_result.state, messages: message_result.state.messages.exclude(Set(message))}}
     all {
-      s.system.values().map(s=>s.round).forall(r => r <= MAX_ROUND), // only for this draft, as I want a finite state space
+      // only for this draft, as I want a finite state space
       s' = apply_effect(
         { ...s, system: s.system.set(process, message_result.state) },
         process,
@@ -662,12 +716,19 @@ module tendermint{
 
   val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
   /// Agreement: no two correct full nodes decide differently.
+
+
+
+
   val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
     p1.decision == None or p2.decision == None or p1.decision == p2.decision
   })
-
   // Witness
   val no_decision = correct_nodes.forall(n => n.decision == None)
+  val validity = correct_nodes.forall(s => s.decision.in(VALID_VALUES.map(v => Some(v)).setAdd(None)))
+
+
+
 
   /* CONSTANTS */
   /// An upper bound on the number of Byzantine processes
@@ -695,11 +756,11 @@ module test{
   //import glyph.* from "glyph"
   import tendermint(
     F = 1,
-    CORRECT = Set("p1", "p2", "p3"),
-    FAULTY = Set("p4"),
-    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "None", 5-> "None", 6 -> "None"),
-    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0", 5 -> "v1"),
-    MAX_ROUND = 1
+    CORRECT = Set("p0"),
+    FAULTY = Set("p3", "p1",  "P2"),
+    PROPOSER = Map(0 -> "p3", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
+    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
+    MAX_ROUND = 4
   ).*
 }
 
