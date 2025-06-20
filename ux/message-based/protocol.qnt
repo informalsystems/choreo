@@ -220,5 +220,4 @@ module protocol {
         apply_effects
     )
 
-
 }
