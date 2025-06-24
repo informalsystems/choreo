@@ -52,11 +52,14 @@ module tendermint {
         evidence_precommit: Set[PreVoteMsg],
     }
 
+    type TimeoutKind = ProposeTimeout | PreVoteTimeout | PreCommitTimeout
+    type TimeoutEvent = { kind: TimeoutKind, round: Round}
+
     type ExternalEffect = 
         |Broadcast(Message)
 
     type InternalEffect = 
-        |StartTimeout
+        |StartTimeout(TimeoutEvent)
 
     type LoggingEffect =
         |CollectEvidence(Message)
@@ -92,10 +95,19 @@ module tendermint {
             }
         })
 
+    pure def valid(v: Value): bool = {
+        VALID_VALUES.contains(v)
+    }
+
+    pure def id(v: Value): ValueId = { hashed: v }
+
     pure def no_transition(state: LocalState): ListenerOutput = {
         // No transition, return the current state with no effects
         { effects: Set(), state: state }
     }
+
+
+    
 
     // Broadcast Pre-Vote Block and start timeout (based on the state and messages can this 
     // transition be enabled?)
@@ -104,12 +116,15 @@ module tendermint {
     // Message guards: predicates on message soup that can use the state as context
     // Effect builder: function to produce the effects 
     // State update: how to produce the next state when this rule fires -> should we have some kind of priority/consolidation rules ? 
-    pure def pre_vote_block_listener(
+
+
+
+
+    pure def broadcast_prevote_upon_proposal(
         s: LocalState,
         messages: Set[Message]
-    ): ListenerOutput = {
+    ): Set[ListenerOutput] = {
         
-        // State guards: predicates on the local state
         val state_guard = and {
             s.stage == ProposeStage
         }
@@ -118,9 +133,7 @@ module tendermint {
         def message_guard = (p) => and {
             p.valid_round == -1,
             p.src == PROPOSER.get(s.round),
-            //p.proposal.valid
-            (p.proposal == s.locked_value or s.locked_round == -1),
-            } 
+        } 
 
 
         // Apply Guards
@@ -129,58 +142,269 @@ module tendermint {
             message_guard(p),
             state_guard
         })
+
+        def effect_builder = (p) => {
+            // Broadcast the PreVote message for the proposal
+            if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
+                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) }))))
+            } else {
+                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))))
+            }
+        } 
         
-        // Effects builder: produce the effects
-        val eff = enabled_proposals.map(p => 
-        //Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(p.proposal.id()) })))
-            Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some({ hashed: p.proposal }) })))
-        )
         
-        // State Update: how to produce the next state when this rule fires
-        // Issue here -> what if multiple transitions are enabled. 
-        {
+        // Map the enabled proposals to effects and teh corresponding state updates
+        val outputs = enabled_proposals.map(p => {
             state: { ...s, stage: PreVoteStage, after_prevote_for_first_time: true },
-            effects: eff
-        }
+            effects: effect_builder(p),
+            // TODO -> add logging effect to collect evidence
+            }   
+        )
+        outputs
     }
 
-    pure def pre_vote_nil_listener(
+
+    pure def broadcast_prevote_upon_prevote_quorum(
         s: LocalState,
         messages: Set[Message]
-    ): ListenerOutput = {
+    ): Set[ListenerOutput] = {
         
-        // State guards: predicates on the local state
         val state_guard = and {
-            s.stage == ProposeStage,
+            s.stage == PreVoteStage
         }
 
-        // Message guards: predicates on the messages that can use the state as context
         def message_guard = (p) => and {
-            p.valid_round == -1,
             p.src == PROPOSER.get(s.round),
-            (p.proposal != s.locked_value and s.locked_round != -1), //or ! p.proposal.valid
-            } 
+            p.valid_round >= 0,
+            p.valid_round < s.round,
+        }
 
-        // Apply Guards
+        
+        val proposals = messages.get_proposals()
+        val pre_votes = messages.get_pre_votes()
+
+        val enabled_proposals = proposals.filter(p => and {
+            message_guard(p),
+            state_guard,
+            pre_votes.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).size() >= 2 * F + 1 // quorum size is F + 1
+        })
+
+        def effect_builder = (p) => {
+            // Broadcast the PreVote message for the proposal
+            if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
+                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))}))))
+            } else {
+                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))))
+            }
+        } 
+
+        val outputs = enabled_proposals.map(p => {
+            state: { ...s, stage: PreCommitStage, after_prevote_for_first_time: true },
+            effects: effect_builder(p),
+            // TODO -> add logging effect to collect evidence
+        })
+        outputs
+
+    }
+
+    pure def start_timeout_upon_prevote_quorum(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+        
+        val state_guard = and {
+            s.stage == PreVoteStage,
+            s.after_prevote_for_first_time
+        }
+
+        def message_guard = (pv) => and {
+            pv.round == s.round,
+        }
+
+        val pre_votes = messages.get_pre_votes()
+        val enabled_pre_votes = pre_votes.filter(pv => and {
+            message_guard(pv),
+            state_guard
+        })
+
+        val quorum = (enabled_pre_votes.map(pv => pv.src).size() >= 2 * F + 1)
+
+        val output = 
+            if (quorum) {
+                // Start the timeout for PreVote
+                Set({ effects: Set(Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round }))), state: { ...s, stage: PreCommitStage, after_prevote_for_first_time: false }})
+            } else {
+                Set()
+            }
+        
+        output
+    }
+
+    pure def update_state_upon_prevote_quorum(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+        
+        val state_guard = and {
+            s.stage == PreCommitStage,
+            s.after_prevote_for_first_time
+        }
+
+        def message_guard = (p) => and {
+            p.src == PROPOSER.get(s.round),   
+        }
+
+        val pre_votes = messages.get_pre_votes()
         val proposals = messages.get_proposals()
         val enabled_proposals = proposals.filter(p => and {
+            message_guard(p),
+            state_guard,
+            pre_votes.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).size() >= 2 * F + 1 // quorum size is F + 1
+        })
+
+        val outputs = enabled_proposals.map(p => {
+            state: { ...s,  valid_value: Some(p.proposal), valid_round: s.round},
+            effects: Set(),
+            // TODO -> add logging effect to collect evidence
+        })
+        outputs
+    }
+
+    pure def broadcast_precommit_upon_prevote_quorum(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+               
+         val state_guard = and {
+            s.stage == PreVoteStage,
+            s.after_prevote_for_first_time
+        }
+
+        def message_guard = (p) => and {
+            p.src == PROPOSER.get(s.round),   
+        }
+
+        val pre_votes = messages.get_pre_votes()
+        val proposals = messages.get_proposals()
+        val enabled_proposals = proposals.filter(p => and {
+            message_guard(p),
+            state_guard,
+            pre_votes.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).size() >= 2 * F + 1 // quorum size is F + 1
+        })
+
+        val outputs = enabled_proposals.map(p => {
+            state: { ...s, stage: PreCommitStage, valid_value: Some(p.proposal),
+                    locked_value: Some(p.proposal), locked_round: p.round, 
+                    valid_round: s.round},
+            effects: Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: p.round, id: Some(id(p.proposal)) })))),
+            // TODO -> add logging effect to collect evidence
+        })
+        outputs
+    }
+
+    // This is relative to nil block broadcast 
+    pure def broadcast_precommit_at_prevote_stage(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+        
+        val state_guard = and {
+            s.stage == PreVoteStage
+        }
+        def message_guard = (p) => and {
+            p.round == s.round,
+            p.id == None
+        }
+        
+        val pre_votes = messages.get_pre_votes()
+        val enabled_pre_votes = pre_votes.filter(p => and {
             message_guard(p),
             state_guard
         })
         
-        // Effects builder: produce the effects
-        val eff = enabled_proposals.map(p => 
-            Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
-        )
-        
-        // State Update: how to produce the next state when this rule fires
-        // Issue here -> what if multiple transitions are enabled.
-        // should we have some kind of priority/consolidation rules ? 
-        {
-            state: { ...s, stage: PreVoteStage, after_prevote_for_first_time: true },
-            effects: eff
-        }
+        // TODO: review this
+        val quorums = enabled_pre_votes.map(p => p.src).size() >= 2 * F + 1 
+        val outputs = 
+            if (quorums) {
+                Set({
+                    effects: Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))),
+                    state: { ...s, stage: PreCommitStage}
+                })
+            } else {
+                Set()
+            }
+        outputs
     }
+
+    pure def start_timeout_upon_precommit_quorum(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+        
+        val state_guard = and {
+            not(s.precommit_quorum)
+        }
+
+        def message_guard = (p) => and {
+            p.round == s.round
+            }
+
+        val pre_commits = messages.get_pre_commits()
+        val enabled_pre_commits = pre_commits.filter(p => and {
+            message_guard(p),
+            state_guard
+        })
+
+        val quorum = (enabled_pre_commits.map(p => p.src).size() >= 2 * F + 1)
+
+        val output = 
+            if (quorum) {
+                // Start the timeout for PreCommit
+                //TODO: s.round and p.round are the same 
+                Set({ effects: Set(Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round }))), state: { ...s, stage: DecidedStage }})
+            } else {
+                Set()
+            }
+        
+        output
+    }
+
+    pure def decide_upon_precommit_quorum(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+        
+        val state_guard = and {
+            s.decision == None,
+        }
+
+        def message_guard = (p) => and {
+            p.src == PROPOSER.get(s.round),
+            p.proposal.valid()   
+        }
+
+        val pre_commits = messages.get_pre_commits()
+        val proposals = messages.get_proposals()
+        val enabled_proposals = proposals.filter(p => and {
+            message_guard(p),
+            state_guard,
+            pre_commits.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).map(p => p.src).size() >= 2 * F + 1 // quorum size is F +
+        })
+        val outputs = enabled_proposals.map(p => {
+            state: { ...s, decision: Some(p.proposal), stage: DecidedStage },
+            effects: Set(),
+            // TODO -> do we need an effect for decision? to stop execution
+            // TODO -> add logging effect to collect evidence
+        })
+        outputs
+    }
+
+        
+
+
+
+
+    
 
 
     const F: int
