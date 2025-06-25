@@ -85,21 +85,23 @@ module glyphDriver {
     }
   }
 
-  /// The step action applies a macro step to the system by non deterministically
-  /// selecting a process and processing all messages in its buffer until an external
-  /// effects is produced.
-  /// The action is parameterized by a receive_message function that defines how to handle
-  /// one received message and an apply_effect function that defines how to apply the effects
-  /// of the message processing to the global state.
+
   action step(
     ev_listener: Listener[p, s, m, o],
     apply_effect: ApplyEffect[p, s, m, o, b]
   ): bool = {
-    nondet process = processes.oneOf()
+    nondet process = oneOf(processes.filter(v => s.system.get(v).message_buffer != Set()))
     val msgs = s.system.get(process).message_buffer
-    val initial = { state: s.system.get(process), effects: Set() }
-    val valid_transitions = ev_listener(initial.state, msgs)
-    // TODO: accelerated semantics here
-    true 
+    val initial = s.system.get(process)
+    val valid_transitions = ev_listener(initial, msgs)
+    all {
+      valid_transitions != Set(),
+      // choose one of the valid transitions
+      nondet transition = oneOf(valid_transitions)
+      // apply the effects of the transition
+      val gs = apply_effect(s, process, transition.effects)
+      val gs1 = {...gs, system: gs.system.put(process, transition.state)}
+      s' = gs1
+    }
   }
 }

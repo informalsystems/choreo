@@ -2,7 +2,7 @@ module tendermint {
     import basicSpells.* from "lib/basicSpells"
 
     import glyphNetwork as GNet from "lib/glyph"
-    import glyphDriver as GD from "lib/glyph"
+    import glyphDriver(processes = NODES) as GD from "lib/glyph"
     import glyphsBase as GB from "lib/glyph"
 
     type Round = int    
@@ -101,10 +101,13 @@ module tendermint {
 
     pure def id(v: Value): ValueId = { hashed: v }
 
+    
+    /*
     pure def no_transition(state: LocalState): ListenerOutput = {
         // No transition, return the current state with no effects
         { effects: Set(), state: state }
     }
+    */
 
 
     
@@ -399,14 +402,108 @@ module tendermint {
         outputs
     }
 
-        
 
+    pure def main_listener(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+        // The main listener that combines all the rules
+        val outputs =
+            Set(
+                broadcast_prevote_upon_proposal(s, messages),
+                broadcast_prevote_upon_prevote_quorum(s, messages),
+                start_timeout_upon_prevote_quorum(s, messages),
+                update_state_upon_prevote_quorum(s, messages),
+                broadcast_precommit_upon_prevote_quorum(s, messages),
+                broadcast_precommit_at_prevote_stage(s, messages),
+                start_timeout_upon_precommit_quorum(s, messages),
+                decide_upon_precommit_quorum(s, messages)
+            ).filter(s => not (s.empty())).flatten()
+        // Return the outputs
+        outputs
+    }
 
+    pure val initial_message =
+        Propose({src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
 
+    pure val initial_bookkeeping = {
+        evidence_propose: Set(),
+        evidence_prevote: Set(),
+        evidence_precommit: Set(),
+        breakpoint: false,
+    }
+
+    pure def initialize_process(n: Node): LocalState = {
+        {
+        process_id: n,
+        message_buffer: Set(initial_message),//.union(byzantine_messages),
+        round: 0,
+        stage: ProposeStage,
+        decision: None,
+        locked_value: None,
+        locked_round: -1,
+        valid_value: None,
+        valid_round: -1,
+        after_prevote_for_first_time: false,
+        precommit_quorum: false,
+        }
+    }
+
+    val byzantine_messages = {
+        val rounds = Set (0) //s.system.values().map(s => s.round)
+        val byzantine_proposals = rounds.map(r => {
+        tuples(FAULTY, VALUES.values(), ROUNDS.setAdd(-1)).map(((f, v, vr)) => {
+            Propose({ src: f, round: r, proposal: v, valid_round: vr })
+        })
+        }).flatten()
+
+        val byzantine_prevotes = rounds.map(r => {
+        tuples(FAULTY, VALUES.values()).map(((f, v)) => {
+            PreVote({ src: f, round: r, id: Some(v.id()) })
+        })
+        }).flatten()
+
+        val byzantine_precommits = rounds.map(r => {
+        tuples(FAULTY, VALUES.values()).map(((f, v)) => {
+            PreCommit({ src: f, round: r, id: Some(v.id()) })
+        })
+        }).flatten()
+
+        // Reintegrate byzantine proposals
+        Set(byzantine_prevotes, byzantine_precommits, byzantine_proposals).flatten()
+    }
 
     
+    type GlobalState = GB::GlobalState[Node,  LocalState, Message, Bookkeeping]
+    pure def apply_effects(
+        env: GlobalState,
+        n: Node,
+        effects: Set[Effect]
+    ): GlobalState =
+        effects.fold(env, (currentEnv, effect) =>
+            match effect {
+            | Ext(ext) =>
+                match ext {
+                    | Broadcast(msg) => GNet::broadcast(currentEnv, msg)
+                }
+            | Inter(inte) =>
+                match inte {
+                    | StartTimeout(event) => currentEnv
+                }
+            | Log(log) =>
+                match log {
+                    | CollectEvidence(msg) =>
+                        currentEnv
+                }
+        }
+    )
 
+    action init = GD::init(initialize_process, initial_bookkeeping)
+    action step = GD::step(main_listener, apply_effects)
+    val agreement = true
+    val decision = GD::s.system.values().forall(v => v.decision == None)
 
+            
     const F: int
     /// The set of correct processes
     const CORRECT: Set[Node]
@@ -424,6 +521,14 @@ module tendermint {
     pure val ROUNDS = VALUES.keys()
     /// The set of all correct values (prepared by the constants)
     pure val VALID_VALUES = ROUNDS.filter(k => PROPOSER.get(k).in(CORRECT)).map(k => VALUES.get(k))
+}
 
-
+module main {
+  import tendermint(
+    F = 1,
+    CORRECT = Set("p1", "p2", "p3"),
+    FAULTY = Set("p4"),
+    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1"),
+    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0"),
+  ).*
 }
