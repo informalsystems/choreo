@@ -383,7 +383,7 @@ module tendermint {
             pre_commits.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).map(p => p.src).size() >= 2 * F + 1 // quorum size is F +
         })
         val outputs = enabled_proposals.map(p => {
-            state: { ...s, decision: Some(p.proposal), stage: DecidedStage },
+            state: { ...s, decision: Some(p.proposal), stage: DecidedStage},
             effects: Set(),
             // TODO -> do we need an effect for decision? to stop execution
             // TODO -> add logging effect to collect evidence
@@ -490,9 +490,10 @@ module tendermint {
     action init = GD::init(initialize_process, initial_bookkeeping)
     action step = GD::step(main_listener, apply_effects)
     val agreement = true
-    val decision = GD::s.system.values().forall(v => v.decision == None)
+    //val decision = GD::s.system.values().forall(v => v.decision == None)
 
             
+    /*
     const F: int
     /// The set of correct processes
     const CORRECT: Set[Node]
@@ -503,21 +504,21 @@ module tendermint {
     /// Which value is proposed in each round.
     /// Values from rounds with correct nodes (in PROPOSER) are considered valid values.
     const VALUES: Round -> Value
-
+    */
     /// The set of all nodes
     pure val NODES = CORRECT.union(FAULTY)
     /// The set of all rounds (prepared by the constants)
     pure val ROUNDS = VALUES.keys()
+   
+    val F = 1
+    val CORRECT = Set("p1", "p2", "p3")
+    val FAULTY = Set("p4")
+    val PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1")
+    val VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0")
+
+
     /// The set of all correct values (prepared by the constants)
     pure val VALID_VALUES = ROUNDS.filter(k => PROPOSER.get(k).in(CORRECT)).map(k => VALUES.get(k))
 }
 
-module main {
-  import tendermint(
-    F = 1,
-    CORRECT = Set("p1", "p2", "p3"),
-    FAULTY = Set("p4"),
-    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1"),
-    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0"),
-  ).*
-}
+
