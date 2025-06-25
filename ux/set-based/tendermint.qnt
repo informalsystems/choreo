@@ -101,16 +101,6 @@ module tendermint {
 
     pure def id(v: Value): ValueId = { hashed: v }
 
-    
-    /*
-    pure def no_transition(state: LocalState): ListenerOutput = {
-        // No transition, return the current state with no effects
-        { effects: Set(), state: state }
-    }
-    */
-
-
-    
 
     // Broadcast Pre-Vote Block and start timeout (based on the state and messages can this 
     // transition be enabled?)
@@ -118,12 +108,11 @@ module tendermint {
     // State guards: predicates on the current state only
     // Message guards: predicates on message soup that can use the state as context
     // Effect builder: function to produce the effects 
-    // State update: how to produce the next state when this rule fires -> should we have some kind of priority/consolidation rules ? 
 
+    
+    // Naming convention for listeners -> on_<stage>_<event>
 
-
-
-    pure def broadcast_prevote_upon_proposal(
+    pure def on_propose_proposal(
         s: LocalState,
         messages: Set[Message]
     ): Set[ListenerOutput] = {
@@ -167,7 +156,7 @@ module tendermint {
     }
 
 
-    pure def broadcast_prevote_upon_prevote_quorum(
+    pure def on_prevote_valid_quorum(
         s: LocalState,
         messages: Set[Message]
     ): Set[ListenerOutput] = {
@@ -210,7 +199,7 @@ module tendermint {
 
     }
 
-    pure def start_timeout_upon_prevote_quorum(
+    pure def on_prevote_first_quorum(
         s: LocalState,
         messages: Set[Message]
     ): Set[ListenerOutput] = {
@@ -243,7 +232,7 @@ module tendermint {
         output
     }
 
-    pure def update_state_upon_prevote_quorum(
+    pure def on_precommit_valid_quorum(
         s: LocalState,
         messages: Set[Message]
     ): Set[ListenerOutput] = {
@@ -273,7 +262,7 @@ module tendermint {
         outputs
     }
 
-    pure def broadcast_precommit_upon_prevote_quorum(
+    pure def on_prevote_commit_ready(
         s: LocalState,
         messages: Set[Message]
     ): Set[ListenerOutput] = {
@@ -306,7 +295,7 @@ module tendermint {
     }
 
     // This is relative to nil block broadcast 
-    pure def broadcast_precommit_at_prevote_stage(
+    pure def on_prevote_nil_quorum(
         s: LocalState,
         messages: Set[Message]
     ): Set[ListenerOutput] = {
@@ -339,7 +328,7 @@ module tendermint {
         outputs
     }
 
-    pure def start_timeout_upon_precommit_quorum(
+    pure def on_precommit_first_quorum(
         s: LocalState,
         messages: Set[Message]
     ): Set[ListenerOutput] = {
@@ -372,7 +361,7 @@ module tendermint {
         output
     }
 
-    pure def decide_upon_precommit_quorum(
+    pure def on_precommit_quorum(
         s: LocalState,
         messages: Set[Message]
     ): Set[ListenerOutput] = {
@@ -410,14 +399,14 @@ module tendermint {
         // The main listener that combines all the rules
         val outputs =
             Set(
-                broadcast_prevote_upon_proposal(s, messages),
-                broadcast_prevote_upon_prevote_quorum(s, messages),
-                start_timeout_upon_prevote_quorum(s, messages),
-                update_state_upon_prevote_quorum(s, messages),
-                broadcast_precommit_upon_prevote_quorum(s, messages),
-                broadcast_precommit_at_prevote_stage(s, messages),
-                start_timeout_upon_precommit_quorum(s, messages),
-                decide_upon_precommit_quorum(s, messages)
+                on_propose_proposal(s, messages),
+                on_prevote_valid_quorum(s, messages),
+                on_prevote_first_quorum(s, messages),
+                on_precommit_valid_quorum(s, messages),
+                on_prevote_commit_ready(s, messages),
+                on_prevote_nil_quorum(s, messages),
+                on_precommit_first_quorum(s, messages),
+                on_precommit_quorum(s, messages)
             ).filter(s => not (s.empty())).flatten()
         // Return the outputs
         outputs
