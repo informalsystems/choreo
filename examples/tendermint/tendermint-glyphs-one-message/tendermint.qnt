@@ -143,9 +143,8 @@ module tendermint{
     })
 
 
-  pure def valid(v: Value): bool = {
+  pure def valid(v: Value): bool = 
     VALID_VALUES.contains(v)
-  }
 
   /// A value hash in an abstract way.
   pure def id(v: Value): ValueId = { hashed: v }
@@ -430,7 +429,8 @@ module tendermint{
 
   // -------------------------------------------------------- Message Handlers ------------------------------------------------------------
   pure def process_propose(s: LocalState, msg: ProposeMsg): HandlerOutput = {
-    val s0 = {... s, messages: s.messages.setAdd(Propose(msg))}
+    //val s0 = {... s, messages: s.messages.setAdd(Propose(msg))}
+    val s0 = s
     val res1 = process_proposal_at_propose_stage(s0, msg)
     val res2 = process_proposal_and_quorum_at_propose_stage(res1.state, msg)
     val res3 = process_proposal_and_quorum_after_prevote_stage_for_the_first_time(res2.state, msg)
@@ -443,7 +443,8 @@ module tendermint{
   }
 
   def process_prevote(s: LocalState, msg: PreVoteMsg): HandlerOutput = {
-    val s0 = {... s, messages: s.messages.setAdd(PreVote(msg))}
+    //val s0 = {... s, messages: s.messages.setAdd(PreVote(msg))}
+    val s0 = s
     val res1 = on_prevote_quorum(s0)
     val res2 = process_prevote_quorum_on_prevote_stage(res1.state, msg)
     {
@@ -455,7 +456,8 @@ module tendermint{
   }
 
   def process_precommit(s: LocalState, msg: PreVoteMsg): HandlerOutput = {
-    val s0 = {... s, messages: s.messages.setAdd(PreCommit(msg))}
+    //val s0 = {... s, messages: s.messages.setAdd(PreCommit(msg))}
+    val s0 = s
     val res1 = on_precommit_quorum(s0)
     val res2 = process_precommit_quorum_for_the_first_time(res1.state, msg)
     {
@@ -467,11 +469,83 @@ module tendermint{
   }
 
   pure def receive_message(s: LocalState, m: Message): HandlerOutput = {
+
     match m {
       | Propose(p) => s.process_propose(p)
       | PreVote(p) => s.process_prevote(p)
       | PreCommit(p) => s.process_precommit(p)
     }
+  }
+
+pure def combined_upon_conditions(s: LocalState, m: Message): bool =
+  match m {
+    | Propose(p) =>
+        // Combines:
+        // - process_proposal_at_propose_stage: valid_round == -1, correct proposer, stage = ProposeStage
+        // - process_proposal_and_quorum_at_propose_stage: correct proposer, stage = ProposeStage,
+        //   2f+1 prevotes for valid_round and proposal id, and valid_round in [0, s.round)
+        // - process_proposal_and_quorum_after_prevote_stage_for_the_first_time: correct proposer,
+        //   stage in {PreVoteStage, PreCommitStage}, after_prevote flag and enough prevotes for s.round
+        // - process_proposal_and_precommit_quorum_but_no_decision: proposer matches msg.round, enough precommits, no decision
+        and {
+          // first condition
+          (p.valid_round == -1 and p.src == PROPOSER.get(s.round) and s.stage == ProposeStage)
+        } or
+        and {
+          // second condition
+          p.src == PROPOSER.get(s.round),
+          s.stage == ProposeStage,
+          s.get_prevotes(p.valid_round, Some(p.proposal.id())).map(m => m.src).size() >= 2 * F + 1,
+          p.valid_round >= 0,
+          p.valid_round < s.round
+        } or
+        and {
+          // third condition
+          p.src == PROPOSER.get(s.round),
+          s.stage.in(Set(PreVoteStage, PreCommitStage)),
+          s.after_prevote_for_first_time,
+          s.get_prevotes(s.round, Some(p.proposal.id())).map(m => m.src).size() >= 2 * F + 1
+        } or
+        and {
+          // fourth condition
+          p.src == PROPOSER.get(p.round),
+          s.get_all_precommits().filter(r => r.round == s.round).map(m => m.src).size() >= 2 * F + 1,
+          s.decision == None
+        }
+
+    | PreVote(p) =>
+        // Combines:
+        // - generic pre-vote condition: p.round == s.round and s.stage in {ProposeStage, PreVoteStage}
+        // - process_prevote_quorum_on_prevote_stage: enough prevotes for s.round and (stage == PreVoteStage and after_prevote)
+        // - process_prevote_quorum_at_prevote_stage: enough nil prevotes and stage == PreVoteStage
+        and {
+          (p.round == s.round and s.stage.in(Set(ProposeStage, PreVoteStage)))
+        } or
+        and {
+          s.get_all_prevotes().filter(r => r.round == s.round).map(m => m.src).size() >= 2 * F + 1,
+          s.stage == PreVoteStage,
+          s.after_prevote_for_first_time
+        } or
+        and {
+          s.get_prevotes(s.round, None).map(m => m.src).size() >= 2 * F + 1,
+          s.stage == PreVoteStage
+        }
+
+    | PreCommit(p) =>
+        // Combines:
+        // - generic precommit condition: p.round == s.round and stage == PreCommitStage
+        // - process_precommit_quorum_for_the_first_time: enough precommits and not yet precommit_quorum
+        and {
+          (p.round == s.round and s.stage == PreCommitStage)
+        } or
+        and {
+          s.get_all_precommits().filter(r => r.round == s.round).map(m => m.src).size() >= 2 * F + 1,
+          not(s.precommit_quorum)
+        }
+  }
+
+  pure def valid_messages(s: LocalState, msgs: Set[Message]): Set[Message] = {
+    msgs.filter(m => combined_upon_conditions(s, m))
   }
 
 
@@ -558,10 +632,10 @@ module tendermint{
     breakpoint: false,
   }
 
-  pure def initialize_process(n: Node): LocalState = {
+  pure def initialize_process(n: Node, byz: Set[Message]): LocalState = {
     {
     process_id: n,
-    messages: Set(initial_message),//.union(byzantine_messages),
+    messages: Set(initial_message).union(byz),
     round: 0,
     stage: ProposeStage,
     decision: None,
@@ -576,21 +650,21 @@ module tendermint{
   }
 
   val byzantine_messages = {
-    val rounds = Set (0) //s.system.values().map(s => s.round)
+    val rounds = Set(0) 
     val byzantine_proposals = rounds.map(r => {
-      tuples(FAULTY, VALUES.values(), ROUNDS.setAdd(-1)).map(((f, v, vr)) => {
+      tuples(FAULTY, Set("v0","v1","v2"), rounds.setAdd(-1)).map(((f, v, vr)) => {
         Propose({ src: f, round: r, proposal: v, valid_round: vr })
       })
     }).flatten()
 
     val byzantine_prevotes = rounds.map(r => {
-      tuples(FAULTY, VALUES.values()).map(((f, v)) => {
+      tuples(FAULTY, Set("v0","v1","v2")).map(((f, v)) => {
         PreVote({ src: f, round: r, id: Some(v.id()) })
       })
     }).flatten()
 
     val byzantine_precommits = rounds.map(r => {
-      tuples(FAULTY, VALUES.values()).map(((f, v)) => {
+      tuples(FAULTY, Set("v0","v1","v2")).map(((f, v)) => {
         PreCommit({ src: f, round: r, id: Some(v.id()) })
       })
     }).flatten()
@@ -599,10 +673,14 @@ module tendermint{
     Set(byzantine_prevotes, byzantine_precommits, byzantine_proposals).flatten()
   }
 
+  
+
   // -------------------------------- actions --------------------------------
   action init = all {
+    nondet byz = byzantine_messages.powerset().oneOf()//.filter(s => s.size()>1).oneOf()
+    //val byz = byzantine_messages
     s' = {
-      system: NODES.mapBy(n => initialize_process(n)),
+      system: NODES.mapBy(n => initialize_process(n,byz)),
       active_timeouts: NODES.mapBy(n => None),
       bookkeeping: initial_bookkeeping,
     }
@@ -696,9 +774,9 @@ module tendermint{
         )
     }
   }
-  action step_one_message = {
+  action step_om = {
     nondet process = NODES.oneOf()
-    val msgs = s.system.get(process).messages.union(byzantine_messages)
+    val msgs = s.system.get(process).messages//.union(byzantine_messages)
     nondet message = msgs.oneOf()
     val message_result = receive_message(s.system.get(process), message)
     all {
@@ -713,16 +791,102 @@ module tendermint{
     }
   }
 
+  action step_wb = {
+    nondet process = CORRECT.oneOf()
+    //nondet byz_pow = byzantine_messages.powerset().oneOf()
+    val msgs = s.system.get(process).messages//.union(byzantine_messages)
+    //val state_with_byz = { ...s.system.get(process), messages: s.system.get(process).messages.union(byz_pow) }
+    //val msgs = state_with_byz.messages.union(byzantine_messages)
+    val transition_set = msgs.map(m => receive_message(s.system.get(process), m)).filter(m => m.state != s.system.get(process))
+    //val transition_set = msgs.map(m => receive_message(state_with_byz, m)).filter(m => m.state != state_with_byz)
+    
+    all {
+      transition_set != Set(),
+      nondet transition = transition_set.oneOf()
+      val message_result = transition
+      s' = apply_effect(
+        { ...s, system: s.system.set(process, message_result.state) },
+        process,
+        message_result.external,
+        message_result.internal,
+        message_result.logging
+      )
+    }
+  }
+
+  action step_wbo = {
+    val non_sym = sym(s)
+    nondet process = non_sym.oneOf()
+    //nondet process = NODES.oneOf()
+    val state = s.system.get(process)
+    val msgs0 = s.system.get(process).messages
+    val msgs = valid_messages(state, msgs0)
+    val transition_set = msgs.map(m => receive_message(s.system.get(process), m))//.filter(m => m.state != s.system.get(process))
+    all {
+
+      transition_set != Set(),
+      nondet transition = transition_set.oneOf()
+      val message_result = transition
+      s' = apply_effect(
+        { ...s, system: s.system.set(process, message_result.state) },
+        process,
+        message_result.external,
+        message_result.internal,
+        message_result.logging
+      )
+    }
+  }
+
+  type Aux = {
+    round: Round,
+    messages: Set[Message],
+    stage: Stage,
+    decision: Option[Value],
+    locked_value: Option[Value],
+    locked_round: Round,
+    valid_value: Option[Value],
+    valid_round: Round,
+    after_prevote_for_first_time: bool,
+    precommit_quorum: bool,
+    is_proposer: bool,
+  }
+
+  pure def sym(s: Environment): Set[Node] = {
+    val states = s.system.values()
+    val unique = group_by(states)
+    // take one per key (group)
+    unique.setByAll((k, group) => group.filter(n =>(n.in(CORRECT))).takeOne()).values().filter(n => n != None).map(n => n.unwrap())
+  }
+
+  def group_by(s: Set[LocalState]): Aux -> Set[Node] = {
+    val init = Map()
+    s.fold(init, (acc, state) => {
+      val key = {
+        round: state.round,
+        messages: state.messages,
+        stage: state.stage,
+        decision: state.decision,
+        locked_value: state.locked_value,
+        locked_round: state.locked_round,
+        valid_value: state.valid_value,
+        valid_round: state.valid_round,
+        after_prevote_for_first_time: state.after_prevote_for_first_time,
+        precommit_quorum: state.precommit_quorum,
+        is_proposer: state.process_id == PROPOSER.get(state.round)
+      }
+      acc.setByWithDefault(key, (e) => e.setAdd(state.process_id),Set())
+    })
+  }
+
+
 
   val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
   /// Agreement: no two correct full nodes decide differently.
-
-
-
-
   val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
     p1.decision == None or p2.decision == None or p1.decision == p2.decision
   })
+
+  
   // Witness
   val no_decision = correct_nodes.forall(n => n.decision == None)
   val validity = correct_nodes.forall(s => s.decision.in(VALID_VALUES.map(v => Some(v)).setAdd(None)))
@@ -749,19 +913,29 @@ module tendermint{
   /// The set of all rounds (prepared by the constants)
   pure val ROUNDS = VALUES.keys()
   /// The set of all correct values (prepared by the constants)
-  pure val VALID_VALUES = ROUNDS.filter(k => PROPOSER.get(k).in(CORRECT)).map(k => VALUES.get(k))
+  //pure val VALID_VALUES = ROUNDS.filter(k => PROPOSER.get(k).in(CORRECT)).map(k => VALUES.get(k))
+  pure val VALID_VALUES = Set("v0","v1", "v2")
 }
 
-module test{
-  //import glyph.* from "glyph"
+module valid{
   import tendermint(
     F = 1,
-    CORRECT = Set("p0"),
-    FAULTY = Set("p3", "p1",  "P2"),
-    PROPOSER = Map(0 -> "p3", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
-    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
+    CORRECT = Set("p1","p2", "p3"),
+    FAULTY = Set("p4"),
+    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
+    VALUES =  Map(0 -> "v1", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
     MAX_ROUND = 4
   ).*
 }
 
+module no_agreement{
+  import tendermint(
+    F = 1,
+    CORRECT = Set("p2", "p3"),
+    FAULTY = Set("p1","p4"),
+    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
+    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
+    MAX_ROUND = 4
+  ).*
+}
 

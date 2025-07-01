@@ -1,9 +1,9 @@
 module tendermint {
     import basicSpells.* from "lib/basicSpells"
 
-    import glyphNetwork as GNet from "lib/glyph"
-    import glyphDriver(processes = NODES) as GD from "lib/glyph"
-    import glyphsBase as GB from "lib/glyph"
+    //import glyphNetwork as GNet from "lib/glyph"
+    //import glyphDriver(processes = NODES) as GD from "lib/glyph"
+    //import glyphsBase as GB from "lib/glyph"
 
     type Round = int    
     type Stage = ProposeStage | PreVoteStage | PreCommitStage | DecidedStage
@@ -14,7 +14,9 @@ module tendermint {
     type ValueId = { hashed: Value }
     type Node = str
 
-    type StateFields = {
+    type LocalState = {
+        process_id: Node,
+        message_buffer: Set[Message],
         round: Round,
         stage: Stage,
         decision: Option[Value],
@@ -44,7 +46,7 @@ module tendermint {
         | PreVote(PreVoteMsg)
         | PreCommit(PreVoteMsg)
 
-    type LocalState = GB::LocalState[Node, Message, StateFields]
+    
 
     type Bookkeeping = {
         evidence_propose: Set[ProposeMsg],
@@ -69,7 +71,10 @@ module tendermint {
       | Inter(InternalEffect)
       | Log(LoggingEffect)
 
-    type ListenerOutput = GB::ListenerOutput[LocalState, Effect]
+    type ListenerOutput = {
+        effects: Set[Effect],
+        state: LocalState,
+    }
 
     pure def get_proposals(messages: Set[Message]): Set[ProposeMsg] =
         messages.filterMap(m => {
@@ -95,8 +100,10 @@ module tendermint {
             }
         })
 
+    
     pure def valid(v: Value): bool = {
         VALID_VALUES.contains(v)
+        //true
     }
 
     pure def id(v: Value): ValueId = { hashed: v }
@@ -419,13 +426,12 @@ module tendermint {
         evidence_propose: Set(),
         evidence_prevote: Set(),
         evidence_precommit: Set(),
-        breakpoint: false,
     }
 
-    pure def initialize_process(n: Node): LocalState = {
+    def initialize_process(n: Node): LocalState = {
         {
         process_id: n,
-        message_buffer: Set(initial_message),//.union(byzantine_messages),
+        message_buffer: Set(initial_message).union(byzantine_messages),
         round: 0,
         stage: ProposeStage,
         decision: None,
@@ -439,7 +445,7 @@ module tendermint {
     }
 
     val byzantine_messages = {
-        val rounds = Set (0) //s.system.values().map(s => s.round)
+        val rounds = Set (0,1) //s.system.values().map(s => s.round)
         val byzantine_proposals = rounds.map(r => {
         tuples(FAULTY, VALUES.values(), ROUNDS.setAdd(-1)).map(((f, v, vr)) => {
             Propose({ src: f, round: r, proposal: v, valid_round: vr })
@@ -463,7 +469,19 @@ module tendermint {
     }
 
     
-    type GlobalState = GB::GlobalState[Node,  LocalState, Message, Bookkeeping]
+    type GlobalState = {
+        system: Node -> LocalState,
+        logging: Bookkeeping,
+    }
+
+    pure def broadcast(
+        env: GlobalState,
+        msg: Message
+  ): GlobalState = {
+    { ...env,
+      system: env.system.transformValues(s => { ...s, message_buffer: s.message_buffer.setAdd(msg) })
+    }
+  }
     pure def apply_effects(
         env: GlobalState,
         n: Node,
@@ -473,7 +491,7 @@ module tendermint {
             match effect {
             | Ext(ext) =>
                 match ext {
-                    | Broadcast(msg) => GNet::broadcast(currentEnv, msg)
+                    | Broadcast(msg) => broadcast(currentEnv, msg)
                 }
             | Inter(inte) =>
                 match inte {
@@ -487,9 +505,36 @@ module tendermint {
         }
     )
 
-    action init = GD::init(initialize_process, initial_bookkeeping)
-    action step = GD::step(main_listener, apply_effects)
-    val agreement = true
+
+
+    var s : GlobalState
+
+    action init = all {
+        s' = {
+        system: NODES.mapBy(v => initialize_process(v)),
+        logging: initial_bookkeeping,
+        }
+    }
+    action step = {
+    nondet process = oneOf(CORRECT.filter(v => s.system.get(v).message_buffer != Set()))
+    val msgs = s.system.get(process).message_buffer
+    val initial = s.system.get(process)
+    val valid_transitions = main_listener(initial, msgs)
+    all {
+      valid_transitions != Set(),
+      // choose one of the valid transitions
+      nondet transition = oneOf(valid_transitions)
+      // apply the effects of the transition
+      val gs = apply_effects(s, process, transition.effects)
+      val gs1 = {...gs, system: gs.system.put(process, transition.state)}
+      s' = gs1
+    }
+  }
+
+    val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
+    val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
+    p1.decision == None or p2.decision == None or p1.decision == p2.decision
+  })
     //val decision = GD::s.system.values().forall(v => v.decision == None)
 
             
@@ -511,9 +556,9 @@ module tendermint {
     pure val ROUNDS = VALUES.keys()
    
     val F = 1
-    val CORRECT = Set("p1", "p2", "p3")
-    val FAULTY = Set("p4")
-    val PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1")
+    val CORRECT = Set("p1", "p2")
+    val FAULTY = Set("p4", "p3")
+    val PROPOSER = Map(0 -> "p4", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1")
     val VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0")
 
 

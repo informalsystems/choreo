@@ -651,7 +651,7 @@ type TimeoutEvent = { kind: TimeoutKind, round: Round }
   pure def initialize_process(n: Node): LocalState = {
     {
       process_id: n,
-      messages: Set(initial_message),
+      messages: Set(initial_message).union(byzantine_messages),
       round: 0,
       stage: ProposeStage,
       decision: None,
@@ -745,7 +745,7 @@ type TimeoutEvent = { kind: TimeoutKind, round: Round }
   }
 
   val byzantine_messages = {
-    val rounds = s.system.values().map(s => s.round)
+    val rounds = Set(0) //s.system.values().map(s => s.round)
     val byzantine_proposals = rounds.map(r => {
       tuples(FAULTY, VALUES.values(), ROUNDS.setAdd(-1)).map(((f, v, vr)) => {
         Propose({ src: f, round: r, proposal: v, valid_round: vr })
@@ -768,8 +768,8 @@ type TimeoutEvent = { kind: TimeoutKind, round: Round }
   }
 
   action init = init0(initialize_process, initial_bookkeeping)
-  action step = step0(receive_message, fire_timeout_event, apply_effect, byzantine_messages, 20)
-  action step_no_timeout = step_no_timeout0(receive_message, apply_effect)
+  //action step = step0(receive_message, fire_timeout_event, apply_effect, byzantine_messages, 20)
+  action step_nt = step_no_timeout0(receive_message, apply_effect)
 
   /* FORK SCENARIOS */
 
@@ -846,7 +846,7 @@ type TimeoutEvent = { kind: TimeoutKind, round: Round }
   }
 }
 
-module tendermint_valid {
+module test {
   import tendermint(
     F = 1,
     processes = Set("p1", "p2", "p3", "p4"),

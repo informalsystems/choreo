@@ -1,0 +1,8 @@
+# ignore any nested _apalache-out, states or tmp dirs (and all their contents)
+**/_apalache-out/**
+**/states/**
+**/tmp/**
+
+# ignore all TLA+ specs and config files
+*.tla
+*.cfg

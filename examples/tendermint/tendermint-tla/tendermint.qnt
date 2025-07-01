@@ -530,7 +530,7 @@ module tendermint {
       // the actions below are not essential for safety, but added for completeness
       OnTimeoutPropose(p),
       OnQuorumOfNilPrevotes(p),
-      OnRoundCatchup(p),
+      //OnRoundCatchup(p),
     }
 
   //**************************** FORK SCENARIOS  ***************************
