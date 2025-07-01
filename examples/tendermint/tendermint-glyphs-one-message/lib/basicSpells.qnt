@@ -406,6 +406,12 @@ module basicSpells {
     }
   }
 
+  pure def toList(s: Set[a]): List[a] = {
+    s.fold(List(), (acc, e) => acc.append(e))
+  }
+
+
+
   pure def setByAll(m: a -> b, f: (a, b) => c): a -> c = {
     m.keys().mapBy(k => f(k, m.get(k)))
   }

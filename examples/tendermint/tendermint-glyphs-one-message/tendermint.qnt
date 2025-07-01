@@ -649,6 +649,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     }
   }
 
+  // Card(powset)= 4096
   val byzantine_messages = {
     val rounds = Set(0) 
     val byzantine_proposals = rounds.map(r => {
@@ -677,8 +678,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
 
   // -------------------------------- actions --------------------------------
   action init = all {
-    nondet byz = byzantine_messages.powerset().oneOf()//.filter(s => s.size()>1).oneOf()
-    //val byz = byzantine_messages
+    nondet byz = byzantine_messages.powerset().oneOf()
     s' = {
       system: NODES.mapBy(n => initialize_process(n,byz)),
       active_timeouts: NODES.mapBy(n => None),
@@ -687,96 +687,9 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
   }
 
 
-  action step_permutations = {
+  action step_naive = {
     nondet process = NODES.oneOf()
-    val all_msgs = s.system.get(process).messages.union(byzantine_messages)
-    val idxs = 1.to(all_msgs.size())
-    val msgs_maps = setOfMaps(idxs, all_msgs).filter(m => tuples(idxs, idxs).forall(((i, j)) => i != j implies m.get(i) != m.get(j)))
-    val msgs_lists = msgs_maps.map(m => {
-      range(1, all_msgs.size() + 1).foldl([], (acc, i) => {
-        if (acc != []) acc.append(m.get(i)) else
-        val state = s.system.get(process)
-        val result = receive_message(state, m.get(i))
-        if (result.state != state) acc.append(m.get(i)) else acc
-      })
-    })
-    nondet ordered_messages = msgs_lists.oneOf()
-    val initial = { state: s.system.get(process), external: Set(), internal: Set(), logging: Set() }
-    val result = ordered_messages.foldl(initial, (accumulated_result, message) => {
-      // Stop after finding the first effect
-      if (accumulated_result.external != Set()) accumulated_result 
-      else{
-        val internal = accumulated_result.internal
-        val external = accumulated_result.external
-        val logging = accumulated_result.logging
-        // accumulate the effects of the message
-        val message_result = receive_message(accumulated_result.state, message)
-        {
-          state: message_result.state,
-          external: external.union(message_result.external),
-          internal: internal.union(message_result.internal),
-          logging: logging.union(message_result.logging)
-        }
-        //accumulated_result.state.receive_message(message)
-      }
-    })
-    all{
-        result.external != Set(),
-        // apply the effects to the environment
-        val new_system = s.system.set(process, result.state)
-        val new_env = {...s, system: new_system}
-        s' = apply_effect(
-            new_env,
-            process,
-            result.external,
-            result.internal,
-            result.logging
-        )
-    }
-  }
-
-
-  action step_accelerated = {
-    nondet process = CORRECT.oneOf()
-    val msgs = s.system.get(process).messages.union(byzantine_messages)
-    val initial = { state: s.system.get(process), external: Set(), internal: Set(), logging: Set() }
-    val all_pos = msgs.powerset().filter(m => m.size() > 0)
-    nondet msgs2 =  all_pos.oneOf()
-    val result = msgs2.fold(initial, (accumulated_result, message) => {
-      // Stop after finding the first effect
-      if (accumulated_result.external != Set()) accumulated_result 
-      else{
-        val internal = accumulated_result.internal
-        val external = accumulated_result.external
-        val logging = accumulated_result.logging
-        // accumulate the effects of the message
-        val message_result = receive_message(accumulated_result.state, message)
-        {
-          state: message_result.state,
-          external: external.union(message_result.external),
-          internal: internal.union(message_result.internal),
-          logging: logging.union(message_result.logging)
-        }
-        //accumulated_result.state.receive_message(message)
-      }
-    })
-    all{
-        result.external != Set(),
-        // apply the effects to the environment
-        val new_system = s.system.set(process, result.state)
-        val new_env = {...s, system: new_system}
-        s' = apply_effect(
-            new_env,
-            process,
-            result.external,
-            result.internal,
-            result.logging
-        )
-    }
-  }
-  action step_om = {
-    nondet process = NODES.oneOf()
-    val msgs = s.system.get(process).messages//.union(byzantine_messages)
+    val msgs = s.system.get(process).messages
     nondet message = msgs.oneOf()
     val message_result = receive_message(s.system.get(process), message)
     all {
@@ -791,15 +704,12 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     }
   }
 
-  action step_wb = {
+  // Step with post transition non determinism
+  action step_o1 = {
     nondet process = CORRECT.oneOf()
-    //nondet byz_pow = byzantine_messages.powerset().oneOf()
-    val msgs = s.system.get(process).messages//.union(byzantine_messages)
-    //val state_with_byz = { ...s.system.get(process), messages: s.system.get(process).messages.union(byz_pow) }
-    //val msgs = state_with_byz.messages.union(byzantine_messages)
-    val transition_set = msgs.map(m => receive_message(s.system.get(process), m)).filter(m => m.state != s.system.get(process))
-    //val transition_set = msgs.map(m => receive_message(state_with_byz, m)).filter(m => m.state != state_with_byz)
-    
+    val msgs = s.system.get(process).messages
+    val transition_set = msgs.map(m => receive_message(s.system.get(process), m)).filter(m => m.state != s.system.get(process) 
+                          or m.external != Set() or m.internal != Set() or m.logging != Set())
     all {
       transition_set != Set(),
       nondet transition = transition_set.oneOf()
@@ -814,16 +724,36 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     }
   }
 
-  action step_wbo = {
-    val non_sym = sym(s)
-    nondet process = non_sym.oneOf()
-    //nondet process = NODES.oneOf()
+  // Step with post transition non determinism and pre condition
+  action step_o2 = {
+    nondet process = NODES.oneOf()
     val state = s.system.get(process)
-    val msgs0 = s.system.get(process).messages
-    val msgs = valid_messages(state, msgs0)
-    val transition_set = msgs.map(m => receive_message(s.system.get(process), m))//.filter(m => m.state != s.system.get(process))
+    val msgs = valid_messages(state, state.messages)
+    val transition_set = msgs.map(m => receive_message(state, m))
     all {
+      transition_set != Set(),
+      nondet transition = transition_set.oneOf()
+      val message_result = transition
+      s' = apply_effect(
+        { ...s, system: s.system.set(process, message_result.state)},
+        process,
+        message_result.external,
+        message_result.internal,
+        message_result.logging
+      )
+    }
+  }
 
+  
+  
+  // Step with post transition non determinism, pre condition and semantic symmetry between nodes
+  action step_o3 = {
+    val r = select_representatives(s)
+    nondet process = r.oneOf()
+    val state = s.system.get(process)
+    val msgs = valid_messages(state, state.messages)
+    val transition_set = msgs.map(m => receive_message(state, m))
+    all {
       transition_set != Set(),
       nondet transition = transition_set.oneOf()
       val message_result = transition
@@ -837,7 +767,8 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     }
   }
 
-  type Aux = {
+  // -------------------------------- semantic symmetry utilities --------------------------------
+  type StateFingerprint = {
     round: Round,
     messages: Set[Message],
     stage: Stage,
@@ -851,14 +782,14 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     is_proposer: bool,
   }
 
-  pure def sym(s: Environment): Set[Node] = {
+  pure def select_representatives(s: Environment): Set[Node] = {
     val states = s.system.values()
-    val unique = group_by(states)
-    // take one per key (group)
-    unique.setByAll((k, group) => group.filter(n =>(n.in(CORRECT))).takeOne()).values().filter(n => n != None).map(n => n.unwrap())
+    val unique = group_by_fingerprint(states)
+    unique.setByAll((k, group) => group.filter(n =>(n.in(CORRECT))).takeOne()).
+      values().filter(n => n != None).map(n => n.unwrap())
   }
 
-  def group_by(s: Set[LocalState]): Aux -> Set[Node] = {
+  def group_by_fingerprint(s: Set[LocalState]): StateFingerprint -> Set[Node] = {
     val init = Map()
     s.fold(init, (acc, state) => {
       val key = {
@@ -877,7 +808,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
       acc.setByWithDefault(key, (e) => e.setAdd(state.process_id),Set())
     })
   }
-
+  // -------------------------------- semantic symmetry utilities --------------------------------
 
 
   val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
@@ -923,7 +854,7 @@ module valid{
     CORRECT = Set("p1","p2", "p3"),
     FAULTY = Set("p4"),
     PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
-    VALUES =  Map(0 -> "v1", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
+    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
     MAX_ROUND = 4
   ).*
 }

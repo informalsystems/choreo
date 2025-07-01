@@ -118,7 +118,6 @@ module tendermint {
 
     
     // Naming convention for listeners -> on_<stage>_<event>
-
     pure def on_propose_proposal(
         s: LocalState,
         messages: Set[Message]
@@ -428,10 +427,10 @@ module tendermint {
         evidence_precommit: Set(),
     }
 
-    def initialize_process(n: Node): LocalState = {
+    def initialize_process(n: Node, byz: Set[Message]): LocalState = {
         {
         process_id: n,
-        message_buffer: Set(initial_message).union(byzantine_messages),
+        message_buffer: Set(initial_message).union(byz),
         round: 0,
         stage: ProposeStage,
         decision: None,
@@ -444,22 +443,23 @@ module tendermint {
         }
     }
 
+    // Card(powset) = 4096
     val byzantine_messages = {
-        val rounds = Set (0,1) //s.system.values().map(s => s.round)
+        val rounds = Set(0) 
         val byzantine_proposals = rounds.map(r => {
-        tuples(FAULTY, VALUES.values(), ROUNDS.setAdd(-1)).map(((f, v, vr)) => {
+        tuples(FAULTY, Set("v0","v1","v2"), rounds.setAdd(-1)).map(((f, v, vr)) => {
             Propose({ src: f, round: r, proposal: v, valid_round: vr })
         })
         }).flatten()
 
         val byzantine_prevotes = rounds.map(r => {
-        tuples(FAULTY, VALUES.values()).map(((f, v)) => {
+        tuples(FAULTY, Set("v0","v1","v2")).map(((f, v)) => {
             PreVote({ src: f, round: r, id: Some(v.id()) })
         })
         }).flatten()
 
         val byzantine_precommits = rounds.map(r => {
-        tuples(FAULTY, VALUES.values()).map(((f, v)) => {
+        tuples(FAULTY, Set("v0","v1","v2")).map(((f, v)) => {
             PreCommit({ src: f, round: r, id: Some(v.id()) })
         })
         }).flatten()
@@ -479,7 +479,7 @@ module tendermint {
         msg: Message
   ): GlobalState = {
     { ...env,
-      system: env.system.transformValues(s => { ...s, message_buffer: s.message_buffer.setAdd(msg) })
+      system: env.system.transformValues(s => { ...s, message_buffer: s.message_buffer.setAdd(msg)})
     }
   }
     pure def apply_effects(
@@ -510,35 +510,35 @@ module tendermint {
     var s : GlobalState
 
     action init = all {
+        nondet byz = byzantine_messages.powerset().oneOf()
         s' = {
-        system: NODES.mapBy(v => initialize_process(v)),
-        logging: initial_bookkeeping,
+            system: NODES.mapBy(v => initialize_process(v,byz)),
+            logging: initial_bookkeeping,
         }
     }
     action step = {
-    nondet process = oneOf(CORRECT.filter(v => s.system.get(v).message_buffer != Set()))
-    val msgs = s.system.get(process).message_buffer
-    val initial = s.system.get(process)
-    val valid_transitions = main_listener(initial, msgs)
-    all {
-      valid_transitions != Set(),
-      // choose one of the valid transitions
-      nondet transition = oneOf(valid_transitions)
-      // apply the effects of the transition
-      val gs = apply_effects(s, process, transition.effects)
-      val gs1 = {...gs, system: gs.system.put(process, transition.state)}
-      s' = gs1
+        nondet process = oneOf(CORRECT.filter(v => s.system.get(v).message_buffer != Set()))
+        val msgs = s.system.get(process).message_buffer
+        val current_state = s.system.get(process)
+        val valid_transitions = main_listener(current_state, msgs)
+        all {
+            valid_transitions != Set(),
+            // choose one of the valid transitions
+            nondet transition = oneOf(valid_transitions)
+            // apply the effects of the transition
+            val s_eff = apply_effects(s, process, transition.effects)
+            val s_next = {...s_eff, system: s_eff.system.put(process, transition.state)}
+            s' = s_next
+        }
     }
-  }
 
     val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
     val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
-    p1.decision == None or p2.decision == None or p1.decision == p2.decision
-  })
-    //val decision = GD::s.system.values().forall(v => v.decision == None)
+        p1.decision == None or p2.decision == None or p1.decision == p2.decision})
+    val no_decision = s.system.values().forall(v => v.decision == None)
 
             
-    /*
+    
     const F: int
     /// The set of correct processes
     const CORRECT: Set[Node]
@@ -549,21 +549,37 @@ module tendermint {
     /// Which value is proposed in each round.
     /// Values from rounds with correct nodes (in PROPOSER) are considered valid values.
     const VALUES: Round -> Value
-    */
+    const MAX_ROUND: Round
+    
     /// The set of all nodes
     pure val NODES = CORRECT.union(FAULTY)
     /// The set of all rounds (prepared by the constants)
     pure val ROUNDS = VALUES.keys()
    
-    val F = 1
-    val CORRECT = Set("p1", "p2")
-    val FAULTY = Set("p4", "p3")
-    val PROPOSER = Map(0 -> "p4", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1")
-    val VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v0", 3 -> "v2", 4 -> "v0")
-
-
     /// The set of all correct values (prepared by the constants)
-    pure val VALID_VALUES = ROUNDS.filter(k => PROPOSER.get(k).in(CORRECT)).map(k => VALUES.get(k))
+    //pure val VALID_VALUES = ROUNDS.filter(k => PROPOSER.get(k).in(CORRECT)).map(k => VALUES.get(k))
+    pure val VALID_VALUES = Set("v0","v1", "v2")
 }
 
 
+module valid{
+  import tendermint(
+    F = 1,
+    CORRECT = Set("p1","p2", "p3"),
+    FAULTY = Set("p4"),
+    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
+    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
+    MAX_ROUND = 4
+  ).*
+}
+
+module no_agreement{
+  import tendermint(
+    F = 1,
+    CORRECT = Set("p2", "p3"),
+    FAULTY = Set("p1","p4"),
+    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
+    VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
+    MAX_ROUND = 4
+  ).*
+}
