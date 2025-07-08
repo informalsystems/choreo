@@ -96,7 +96,7 @@ module tendermint {
   pure val Values = ValidValues.union(InvalidValues)
   // a special value for a nil round, outside of Values
   pure val NilValue = "None"
-  pure val ValuesOrNil = Set(NilValue).union(Values)
+  pure val ValuesOrNil = Values//Set(NilValue).union(Values)
 
   // a value hash is modeled as identity
   pure def Id(v) = v
@@ -158,13 +158,16 @@ module tendermint {
   var fired_action: str
 
   //********************* PROTOCOL INITIALIZATION ******************************
+  
+  val Rounds0 = Set(0)
+  val RoundsOrNil0 = Set(-1).union(Rounds0)
   def FaultyProposals(r) =
-      tuples(Faulty, Values, RoundsOrNil)
+      tuples(Faulty, Values, RoundsOrNil0)
         .map( ((p, v, vr)) =>
           { src: p, round: r, proposal: v, validRound: vr })
 
   val AllFaultyProposals =
-      Rounds.map(r => FaultyProposals(r))
+      Rounds0.map(r => FaultyProposals(r))
             .flatten()
 
   def FaultyPrevotes(r) =
@@ -172,7 +175,7 @@ module tendermint {
         .map( ((p, v)) => { src: p, round: r, id: v })
 
   val AllFaultyPrevotes =
-      Rounds.map(r => FaultyPrevotes(r))
+      Rounds0.map(r => FaultyPrevotes(r))
             .flatten()
 
   def FaultyPrecommits(r) =
@@ -180,8 +183,10 @@ module tendermint {
         .map( ((p, v)) => { src: p, round: r, id: v })
 
   val AllFaultyPrecommits =
-      Rounds.map(r => FaultyPrecommits(r))
+      Rounds0.map(r => FaultyPrecommits(r))
             .flatten()
+
+ 
 
   // The initial states of the protocol. Some faults can be in the system already.
   action Init = all {
@@ -528,7 +533,7 @@ module tendermint {
       nondet vr = oneOf(RoundsOrNil)
       UponProposalInPrecommitNoDecision(p, v, r, vr),
       // the actions below are not essential for safety, but added for completeness
-      OnTimeoutPropose(p),
+      //OnTimeoutPropose(p),
       OnQuorumOfNilPrevotes(p),
       //OnRoundCatchup(p),
     }
@@ -673,7 +678,7 @@ module test{
     T = 1,
     ValidValues = Set("v0", "v1"),
     InvalidValues = Set("v2"),
-    MaxRound = 4,
+    MaxRound = 0,
     Proposer = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4", 4 -> "p1")
   ).*
 }

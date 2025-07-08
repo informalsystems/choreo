@@ -1,3 +1,4 @@
+// -*- mode: Bluespec; -*-
 module protocol {
     import basicSpells.* from "lib/basicSpells"
 

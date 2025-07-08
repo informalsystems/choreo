@@ -1,3 +1,4 @@
+// -*- mode: Bluespec; -*-
 module tendermint {
     import basicSpells.* from "lib/basicSpells"
 
@@ -516,6 +517,7 @@ module tendermint {
             logging: initial_bookkeeping,
         }
     }
+    
     action step = {
         nondet process = oneOf(CORRECT.filter(v => s.system.get(v).message_buffer != Set()))
         val msgs = s.system.get(process).message_buffer
@@ -531,6 +533,67 @@ module tendermint {
             s' = s_next
         }
     }
+
+    action step_o1 = {
+        val r = select_representatives(s)
+        nondet process = r.oneOf() 
+        val msgs = s.system.get(process).message_buffer
+        val current_state = s.system.get(process)
+        val valid_transitions = main_listener(current_state, msgs)
+        all {
+            valid_transitions != Set(),
+            // choose one of the valid transitions
+            nondet transition = oneOf(valid_transitions)
+            // apply the effects of the transition
+            val s_eff = apply_effects(s, process, transition.effects)
+            val s_next = {...s_eff, system: s_eff.system.put(process, transition.state)}
+            s' = s_next
+        }
+    }
+
+
+  // -------------------------------- semantic symmetry utilities --------------------------------
+  type StateFingerprint = {
+    round: Round,
+    messages: Set[Message],
+    stage: Stage,
+    decision: Option[Value],
+    locked_value: Option[Value],
+    locked_round: Round,
+    valid_value: Option[Value],
+    valid_round: Round,
+    after_prevote_for_first_time: bool,
+    precommit_quorum: bool,
+    is_proposer: bool,
+  }
+
+  pure def select_representatives(s: GlobalState): Set[Node] = {
+    val states = s.system.values()
+    val unique = group_by_fingerprint(states)
+    unique.setByAll((k, group) => group.filter(n =>(n.in(CORRECT))).takeOne()).
+      values().filter(n => n != None).map(n => n.unwrap())
+  }
+
+  def group_by_fingerprint(s: Set[LocalState]): StateFingerprint -> Set[Node] = {
+    val init = Map()
+    s.fold(init, (acc, state) => {
+      val key = {
+        round: state.round,
+        messages: state.message_buffer,
+        stage: state.stage,
+        decision: state.decision,
+        locked_value: state.locked_value,
+        locked_round: state.locked_round,
+        valid_value: state.valid_value,
+        valid_round: state.valid_round,
+        after_prevote_for_first_time: state.after_prevote_for_first_time,
+        precommit_quorum: state.precommit_quorum,
+        is_proposer: state.process_id == PROPOSER.get(state.round)
+      }
+      acc.setByWithDefault(key, (e) => e.setAdd(state.process_id),Set())
+    })
+  }
+  // -------------------------------- semantic symmetry utilities --------------------------------
 
     val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
     val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {

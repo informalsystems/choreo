@@ -1,3 +1,4 @@
+// -*- mode: Bluespec; -*-
 module tendermint {
     import basicSpells.* from "lib/basicSpells"
 
