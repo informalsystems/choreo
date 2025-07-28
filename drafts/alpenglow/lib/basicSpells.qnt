@@ -232,6 +232,10 @@ module basicSpells {
     m.keys().mapBy(k => f(m.get(k)))
   }
 
+  pure def transformValuesWithDefault(m: a -> b, f: (b) => c, default: c): a -> c = {
+    m.keys().mapBy(k => if (m.has(k)) f(m.get(k)) else default)
+  }
+
   run transformValuesTest = {
     pure val m = Map("a" -> 1, "b" -> 2)
     assert(m.transformValues(x => x + 1) == Map("a" -> 2, "b" -> 3))
@@ -371,14 +375,6 @@ module basicSpells {
     assert(setByWithDefault(Map(1 -> 2, 2 -> 3), 3, x => x + 1, 0) == Map(1 -> 2, 2 -> 3, 3 -> 1)),
   }
 
-  //// Returns a set of the elements in the list.
-  ////
-  //// - @param list a list
-  //// - @returns a set of the elements in list
-  pure def toSet(list: List[a]): Set[a] = {
-      list.foldl(Set(), (s, e) => s.union(Set(e)))
-  }
-
   pure def unwrap(value: Option[a]): a = {
     match value {
       | None => Map().get(value)
@@ -393,5 +389,35 @@ module basicSpells {
         | None => acc
       }
     })
+  }
+
+  pure def groupBy(s: Set[a], f: (a) => b): b -> Set[a] = {
+    val init : b -> Set[a] = Map()
+    s.fold(init, (acc, e) => {
+      val key = f(e)
+      acc.setByWithDefault(key,(s) => s.union(Set(e)), Set())
+    })
+  }
+
+  pure def takeOne(s: Set[a]): Option[a] = {
+    // if the set is empty, return None
+    if (s == Set()) {
+      None
+    } else {
+      // otherwise, convert the set to a list and take the first element
+      val l = s.fold(List(), (acc, e) => acc.append(e))
+      Some(l[0])
+    }
+  }
+
+  /*
+  pure def toList(s: Set[a]): List[a] = {
+    s.fold(List(), (acc, e) => acc.append(e))
+  }
+  */
+
+
+  pure def setByAll(m: a -> b, f: (a, b) => c): a -> c = {
+    m.keys().mapBy(k => f(k, m.get(k)))
   }
 }

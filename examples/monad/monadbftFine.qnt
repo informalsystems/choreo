@@ -43,7 +43,6 @@ module monadbft{
     // for MonadBFT
     type LocalState = csmi::LocalState[Address, State]
     type Transition = csmi::Transition[LocalState, Effects]
-    type Transitions = csmi::Transitions[Transition]
 
     type EnvExtensions = {
         proposals_mock: Set[Proposal],
@@ -59,14 +58,14 @@ module monadbft{
         EnvExtensions
     ]
     
-    type LocalContext = csmi::LocalContext[Message, InternalEvent, EnvExtensions]
+    type LocalContext = csmi::LocalContextF[Message, InternalEvent, EnvExtensions]
     pure def env_to_context(
         env: Environment, 
-        process_id: Address
+        process_id: Address,
+        eve: csmi::Event[Message, InternalEvent]
     ): LocalContext = 
         {
-            msgBuffer: env.msgBuffer.getOrElse(process_id, Set()),
-            internalBuffer: env.internalBuffer.getOrElse(process_id, Set()),
+            event: eve,
             proposals_mock: env.extensions.proposals_mock,
             ancestors_mock: env.extensions.ancestors_mock,
         }
@@ -108,14 +107,21 @@ module monadbft{
 
     type State = {
         // Variables from Algorithm 2
-        high_tip: Option[Tip], 
-        tip: Option[Tip], 
-        last_tc: Option[TC], 
-        curView: int, 
-        ledger: Ledger, 
-        highest_voted_view: int, 
+        high_tip: Option[Tip],
+        tip: Option[Tip],
+        last_tc: Option[TC],
+        curView: int,
+        ledger: Ledger,
+        highest_voted_view: int,
+
+        // Variables from Algorithm 4
+
+        // Not listed on top but used in Alg 4 line 30
+        votes: ProposalID -> Set[VoteMsg],
+        // Mapping from view number to set of timeout messages (Alg 4 line 17)
+        timeouts: int -> Set[TimeoutMsg],
         // Set of view numbers for which a timeout was broadcast (Alg 4 line 21/22)
-        timeouts_already_broadcast: Set[int], 
+        timeouts_already_broadcast: Set[int],
     }
 
 
@@ -250,6 +256,14 @@ module monadbft{
     pure def was_timeout_already_broadcast(s: LocalState, view: int): bool = {
         s.timeouts_already_broadcast.contains(view)
     }
+    
+    pure def add_timeouts(s: LocalState, view: int, timeouts: Set[TimeoutMsg]): LocalState = {
+        { ...s, timeouts: s.timeouts.put(view, timeouts) }
+    }
+
+    
+    pure def add_votes(s: LocalState, proposal_id: ProposalID, votes: Set[VoteMsg]): LocalState =
+    { ...s, votes: s.votes.put(proposal_id, votes) }
 
 
     //
@@ -317,36 +331,32 @@ module monadbft{
 
     /// Build a TC out of a set of timeout messages
     pure def build_tc(timeouts: Set[TimeoutMsg], addr: Address): TC = {
-        // getOnlyElement will throw an error if we have different views 
+        // getOnlyElement will throw an error if we have different views
         val view = timeouts.map(t => t.view).getOnlyElement()
-        val high_tip = find_high_tip_from_messages(timeouts)
+        val high_tip = find_high_tip_from_messages(timeouts) 
         {
-            c: timeouts,
-            view: view,
-            high_tip: high_tip,
-            tips: get_tips_from_timeouts(timeouts),
-            sigma: addr,
+        c: timeouts,
+        view: view,
+        high_tip: high_tip,
+        tips: get_tips_from_timeouts(timeouts),
+        sigma: addr,
         }
     }
 
     /// Build a QC out of a set of votes
-    pure def build_qc(votes: Set[VoteMsg], addr: Address, state_hash: StateHash): Option[QC] = {
+    pure def build_qc(votes: Set[VoteMsg], addr: Address, state_hash: StateHash): QC = {
         // getOnlyElement will throw an error if we have different seqs/views
-        if (votes.size() < Q) None
-        else
-            val seq = votes.map(v => v.seq).getOnlyElement()
-            val view = votes.map(v => v.view).getOnlyElement()
-            val id = { seq:  seq, view: view, byzantine: 0 }
-            Some(
-                {
-                c: votes,
-                view: view,
-                seq: seq,
-                proposal_id: id,
-                state_hash: state_hash,
-                sigma: addr,
-                }
-            )
+        val seq = votes.map(v => v.seq).getOnlyElement()
+        val view = votes.map(v => v.view).getOnlyElement()
+        val id = { seq: seq, view: view, byzantine: 0 }
+        {
+        c: votes,
+        view: view,
+        seq: seq,
+        proposal_id: id,
+        state_hash: state_hash,
+        sigma: addr,
+        }
     }
 
     
@@ -567,36 +577,6 @@ module monadbft{
     }
 
 
-    pure def get_proposals(
-        messages: Set[Message]
-    ): Set[Proposal] = 
-        messages.filterMap(m => {
-                match m {
-                    | Prop(p) => Some(p)
-                    | _ => None
-                }
-        })
-
-    pure def get_votes(
-        messages: Set[Message]
-    ): Set[VoteMsg] = 
-        messages.filterMap(m => {
-                match m {
-                    | Vote(v) => Some(v)
-                    | _ => None
-                }
-        })
-
-    pure def get_timeouts(
-        messages: Set[Message]
-    ): Set[TimeoutMsg] = 
-        messages.filterMap(m => {
-                match m {
-                    | Timeout(t) => Some(t)
-                    | _ => None
-                }
-        })
-
     pure def get_timeout_events(
         events: Set[InternalEvent]
     ): Set[TimeoutData] = 
@@ -672,170 +652,148 @@ module monadbft{
                 }
             })
     }
-
-    pure def acc_timeouts(
-        ls: LocalState, 
-        timeouts: Set[TimeoutMsg]
-    ): Transition =
-        timeouts.fold(nop(ls), (tr, t) => {
-            tr.and_then(s => increment_view(t.tip.block_header.qc.view, s))
-            .and_then(s => increment_view(t.tip.view, s))
-        })
-
-    pure def handle_timeouts(
-        tr: Transition,
-        timeouts: Set[TimeoutMsg]
-    ): (Transition, Option[TC]) = {
-        // Check if we have a quorum
-        val v = timeouts.map(t => t.view).getOnlyElement()
-        val s0 = tr.postState
+    
         
-        if (timeouts.size() >= Q) {
-            val tc = build_tc(timeouts, s0.process_id)
-            (tr.and_then(s => increment_view(tc.view, s)), Some(tc))
-        } else if (timeouts.size() >= F + 1 and not(s0.timeouts_already_broadcast.contains(v))) {
+    /// Alg 4 line 10
+    /// Output = (TC, Side effects, bool: whether to trigger timeout event)
+    pure def handle_timeout(t: TimeoutMsg, s: LocalState): (Option[TC], Transition)  = {
+        val v = t.view
+
+        if (v < s.curView) (None, nop(s)) else
+
+        pure val res = increment_view(t.tip.block_header.qc.view, s)
+        .and_then(s => increment_view(t.tip.view, s))
+
+        pure val res2 = res.postState.and_then_state(s => {
+        // Timeout is new, let's accumulate it
+        val acc_timeouts = s.timeouts.getOrElse(v, Set()).setAdd(t)
+        s.add_timeouts(v, acc_timeouts).and_then_state(s => {
+            // Check if we have a quorum
+            if (acc_timeouts.size() >= Q) {
+            val tc = build_tc(acc_timeouts, s.process_id)
+            (Some(tc), increment_view(tc.view, s))
+            } else if (acc_timeouts.size() >= F + 1 and not(s.timeouts_already_broadcast.contains(v))) {
             // TRIGGER TIMEOUT EVENT
-            val tr1 = {...tr , postState: s0.mark_already_broadcast_timeout(v)} 
-            (tr1.and_then(s => trigger_timeout_event(s)), None)
-        } else {
-            (nop(s0), None)
-        }
+            (None, s.mark_already_broadcast_timeout(v).trigger_timeout_event())
+            } else {
+            (None, nop(s))
+            }
+        })
+        })
+
+        (res2._1, join_results(res, res2._2))
     }
 
-    pure def post_handle_timeouts(
-        tr: Transition,
-        tc: Option[TC],
-        mock: Set[Proposal], // This is a mock environment extension to simulate proposal fetching
-    ): Transition = {
-
+    /// Alg 4 line 25
+    pure def handle_vote(vote: VoteMsg, s: LocalState): (Option[QC], Transition) = {
+        val v = vote.view
+        val id = vote.proposal_id
         
-        tr.and_then(s => {
-                // Update the local state with the new TC
-                if (tc == None) nop(s) 
-                else 
-                    { ...s, last_tc: tc, high_tip: tc.unwrap().high_tip }.and_then_state(s => {
-                        // TODO: it should be safe to unwrap here, but we should check.
-                        val high_tip = tc.unwrap().high_tip.unwrap()
+        if (v < s.curView) (None, nop(s)) else
 
-                        // if block and its payload (block.payload) for high tip is present
-                            // Line 17
-                        val block = get_present_block(mock, high_tip.block_header)
-                        val p = build_proposal(s.curView, block, tc, None, s.process_id)
-                        { postState: s, effects: Set(BroadcastProp(p))}
-                            // Line 18-19-20 recoveringcurView ← true; SendRecoveryRequest(curView, high tip, tc);
-                            // TODO: For the moment this is replaced by fetching the block from the DA variable for debugging purposes
-                     
-                    })
-        })
-    }
-    
-    //------------------------------------------ Transition Listeners ------------------------------------------
-    
-    
-    pure def all_upon_proposal(
-        ls: LocalState,
-        context: LocalContext
-    ): Transitions = {
-        val props_messages = get_proposals(context.msgBuffer)
-        val props_mock = context.proposals_mock
-        val ancestors_mock = context.ancestors_mock
+        // Vote is new, let's accumulate it
+        val acc_votes = s.votes.getOrElse(id, Set()).setAdd(vote)
 
-        props_messages.map(p => {
-            handle_proposal(ls, p, props_mock, ancestors_mock)
+        s.add_votes(id, acc_votes).and_then_state(s => {
+        // Check if we have a quorum
+        if (acc_votes.size() >= Q) {
+            val qc = build_qc(acc_votes, s.process_id, state_hash(s))
+            (Some(qc), increment_view(qc.view, s))
+        } else {
+            (None, nop(s))
+        }
         })
     }
 
-    
     //
     // Algorithm 2 (page 15)
     // Consensus for Validator i
     // 
 
     /// Alg 2 line 3 (Only for the leader)
-    pure def leader_upon_vote_quorum(
-        ls: LocalState,
-        context: LocalContext
-    ): Transitions = {
+    pure def upon_vote_msg(s: LocalState, v: VoteMsg): Transition = {
+        //if (not(s.i_am_leader())) nop(s) else
+        // Line 3
+        pure val r = handle_vote(v, s)
+        pure val qc = r._1
+        pure val res = r._2
+        if (not(res.postState.i_am_leader())) nop(s) else
+            res.and_then(s => {
+            if (qc == None) nop(s) else
+            val new_block = build_block(qc.unwrap(), BLOCK_PAYLOAD)
+            val p = build_proposal(s.curView, new_block, None, None, s.process_id)
+            { postState: s, effects: Set(BroadcastProp(p)) }
+            })
+    }
+
+
+    /// Alg 2 line 10 / line 52 (leader/ non-leader)
+    pure def upon_timeout_msg(ls: LocalState, t: TimeoutMsg, prop_mock: Set[Proposal]): Transition = {
+        pure val res = handle_timeout(t, ls)
+        pure val tc = res._1
+        res._2.and_then(s => {
+        // line 52 (non-leader)
+        if (not(s.i_am_leader())) nop(s) else
+
+        // line 11 (leader)
+
+        // Not enough timeout messages to form tc
+        if (tc == None) nop(s) else
+
+        { ...s, last_tc: tc, high_tip: tc.unwrap().high_tip }.and_then_state(s => {
+            // TODO: it should be safe to unwrap here, but we should check.
+            val high_tip = tc.unwrap().high_tip.unwrap()
+
+            // if block and its payload (block.payload) for high tip is present
+            if ( block_present(prop_mock ,high_tip.block_header)) {
+            // Line 17
+            val block = get_present_block(prop_mock, high_tip.block_header)
+            val p = build_proposal(s.curView, block, tc, None, s.process_id)
+                { postState: s, effects: Set(BroadcastProp(p)) }
+            } else
+            // Line 18-19-20 recoveringcurView ← true; SendRecoveryRequest(curView, high tip, tc);
+            // TODO: For the moment this is replaced by fetching the block from the DA variable for debugging purposes
+            val block = get_present_block(prop_mock, high_tip.block_header)
+            val p = build_proposal(s.curView, block, tc, None, s.process_id)
+                { postState: s, effects: Set(BroadcastProp(p)) }
+        })
+        })
+    }
+
     
-        val votes_messages = get_votes(context.msgBuffer)
-        val valid_votes = votes_messages.filter(v => v.view >= ls.curView)
-        // Group votes by proposal ID
-        val candidates = valid_votes.groupBy(v => v.proposal_id).
-                        transformValues(s => build_qc(s, ls.process_id, state_hash(ls))).
-                        values().
-                        filter(v => v != None).
-                        map(v => v.unwrap()).
-                        map(qc => (qc, increment_view(qc.view, ls))).
-                        filter(pair => pair._2.postState.i_am_leader()). //am I the leader post view increment?
-                        map(pair => {
-                            val qc = pair._1
-                            val transition = pair._2
-                            transition.and_then(s => {
-                                val new_block = build_block(qc, BLOCK_PAYLOAD)
-                                val p = build_proposal(s.curView, new_block, None, None, s.process_id)
-                                {postState: s, effects: Set(BroadcastProp(p))}
-                            })                             
-                        })
-        candidates
+    pure def upon_proposal_msg(
+        ls: LocalState,
+        proposal: Proposal,
+        context: LocalContext
+    ): Transition = {
+        val props_mock = context.proposals_mock
+        val ancestors_mock = context.ancestors_mock
+        handle_proposal(ls, proposal, props_mock, ancestors_mock)
     }
+
+
+    type Event = csmi::Event[Message, InternalEvent]
+
+    pure def handler(
+        ls: LocalState,
+        context: LocalContext
+    ): Transition =
+        val event = context.event
+        match event {
+            |Ext(msg) => 
+                match msg {
+                    | Prop(p) => upon_proposal_msg(ls, p, context)
+                    | Vote(v) => upon_vote_msg(ls, v)
+                    | Timeout(t) => upon_timeout_msg(ls, t, context.proposals_mock)
+                    | _ => nop(ls) // Ignore other external messages
+                }
+            |Inter(e) =>
+                match e {
+                    | TimeoutEvent(data) => trigger_timeout_event(ls)
+                    | _ => nop(ls) // Ignore other internal events
+                }
+        }
         
-    pure def leader_upon_timeout_quorum(
-        ls: LocalState,
-        context: LocalContext
-    ): Transitions = {
-
-        val mock_proposals = context.proposals_mock
-        val timeouts_messages = get_timeouts(context.msgBuffer)
-        val valid_timeouts = timeouts_messages.filter(t => t.view >= ls.curView)
-        // Group timeouts by view
-        val candidates = valid_timeouts.groupBy(t => t.view).
-                        transformValues(s => (s, acc_timeouts(ls, s))).
-                        values().
-                        map(pair => handle_timeouts(pair._2, pair._1)).
-                        filter(r => r._1.postState.i_am_leader()).
-                        map(pair => post_handle_timeouts(pair._1, pair._2, mock_proposals)).
-                        filter(tr => tr.effects.size() > 0)
-        candidates
-    }
-
-    pure def all_upon_timeout_quorum(
-        ls: LocalState,
-        context: LocalContext
-    ): Transitions = {
-        val timeouts_messages = get_timeouts(context.msgBuffer)
-        val valid_timeouts = timeouts_messages.filter(t => t.view >= ls.curView)
-        // Group timeouts by view
-        val candidates = valid_timeouts.groupBy(t => t.view).
-                        transformValues(s => (s, acc_timeouts(ls, s))).
-                        values().
-                        map(pair => handle_timeouts(pair._2, pair._1)).
-                        map(pair => pair._1).
-                        filter(r => not(r.postState.i_am_leader())).
-                        filter(tr => tr.effects.size() > 0)
-        candidates
-    }
-
-    pure def upon_timeout_event(
-        ls: LocalState,
-        context: LocalContext
-    ): Transitions = {
-        val timeout_events = get_timeout_events(context.internalBuffer)
-        timeout_events.filter(t => t >= ls.curView).
-            map(t => trigger_timeout_event(ls))
-    }
-
-    pure def listener(
-        ls: LocalState,
-        context: LocalContext
-    ): Transitions =
-        
-        Set(
-            all_upon_proposal(ls, context),
-            leader_upon_vote_quorum(ls, context),
-            leader_upon_timeout_quorum(ls, context),
-            all_upon_timeout_quorum(ls, context),
-            upon_timeout_event(ls, context)
-        ).flatten().filter(tr => tr.effects.size() > 0 or tr.postState != ls)
         
  
 
@@ -957,19 +915,19 @@ module monadbft{
     pure val votes1 = validators.map(v => {
         { view: 1, seq: 1, proposal_id: p1.proposal_id, state_hash: List(), sigma: v }
     })
-    pure val qc1 = build_qc(votes1, sigs[2], List()).unwrap()
+    pure val qc1 = build_qc(votes1, sigs[2], List())
     pure val b2 = build_block(qc1, "VALID_TRANSACTION_INIT_2")
     pure val p2 = build_proposal(2, b2, None, None, sigs[2])
     pure val votes2 = validators.map(v => {
         { view: 2, seq: 2, proposal_id: p2.proposal_id, state_hash: List(p1.proposal_id), sigma: v }
     })
-    pure val qc2 = build_qc(votes2, sigs[3], List(p1.proposal_id)).unwrap()
+    pure val qc2 = build_qc(votes2, sigs[3], List(p1.proposal_id))
     pure val b3 = build_block(qc2, "VALID_TRANSACTION_INIT_3")
     pure val p3 = build_proposal(3, b3, None, None, sigs[3])
     pure val votes3 = validators.map(v => {
         { view: 3, seq: 3, proposal_id: p3.proposal_id, state_hash: List(p1.proposal_id, p2.proposal_id), sigma: v }
     })
-    pure val qc3 = build_qc(votes3, sigs[4], List(p1.proposal_id, p2.proposal_id)).unwrap()
+    pure val qc3 = build_qc(votes3, sigs[4], List(p1.proposal_id, p2.proposal_id))
     pure val b4 = build_block(qc3, "VALID_TRANSACTION_INIT_4")
     pure val p4 = build_proposal(4, b4, None, None, sigs[4])
 
@@ -981,7 +939,7 @@ module monadbft{
     )
     pure val proposals_4 = Set(p1, p2, p3, p4)
     
-    pure val initial_messages = Set(Prop(p4)).union(byz_messages)
+    pure val initial_messages = Set(Prop(p4))
 
     pure def initialize_process_empty(process_id: Address): LocalState = {
         high_tip: None,
@@ -992,6 +950,8 @@ module monadbft{
         ledger: [],
         highest_voted_view: -1,
         process_id: process_id,
+        votes: Map(),
+        timeouts: Map(),
     }
 
     pure def initialize_process(process_id: Address): LocalState = {
@@ -1006,13 +966,13 @@ module monadbft{
                 block_header: header_from_block(b3),
                 sigma: p3.sigma,
                 nec: None,
-            })
+            }),
         }
     }
 
     pure def initialize_msg_buffer(
         process_id: Address
-    ): Set[Message] =  initial_messages
+    ): Set[Message] =  initial_messages.union(byz_messages)
 
     pure def initialize_internal_buffer(
         process_id: Address
@@ -1040,21 +1000,39 @@ module monadbft{
         initialize_msg_buffer,
         initialize_internal_buffer,
         initial_env,
-        byz_messages,
+        byz_messages
     )
 
-    action step = csmi::step(
-        listener,
+    action step = csmi::stepF(
+        handler,
         apply_effect,
         env_to_context,
         displayer,
         Set()
     )
 
+    pure val byz_messages = {
+        val faulty = Set("v4")
+        val target_views = 1000.to(1020)
+        
+        // Use fold to build a set directly
+        target_views.fold(Set(), (acc1, v) => 
+            faulty.fold(acc1, (acc2, f) => {
+                val voteMsg = { 
+                    view: v, 
+                    seq: v, 
+                    proposal_id: { seq: v, view: v, byzantine: 1 }, 
+                    state_hash: List(), 
+                    sigma: f 
+                }
+                acc2.setAdd(Vote(voteMsg))
+            })
+        )
+    }
+
     // ------------------------------------------- Invariants and Witnesses -------------------------------------------
     /// Witness: Search for a scenario where a proposal gets reproposed.
     def reproposal =
-        
             val proposals = csmi::s.logging.msgHistory.fold(Set(), (s, x) => match x {
                 | Prop(p) => s.setAdd(p)
                 | _ => s
@@ -1091,13 +1069,13 @@ module monadbft{
     
     /// Witness: Search for a scenario where a proposal is committed with a TC.
     def commit_with_tc =
-            val ps = csmi::s.logging.committed_proposals.values().flatten()
-            ps.exists(p => p.tc != None)
+        val ps = csmi::s.logging.committed_proposals.values().flatten()
+        ps.exists(p => p.tc != None)
         
+
 
     /// Witness: Search for a view where no one timed out.
     def no_timeouts =
-        
             val timeouts = csmi::s.logging.msgHistory.fold(Set(), (s, x) => match x {
                 | Timeout(t) => s.setAdd(t)
                 | _ => s
@@ -1110,28 +1088,6 @@ module monadbft{
             proposals.exists(p =>
                 timeouts.forall(t => t.view != p.view)
             )
-        
-
-
-
-    pure val byz_messages = {
-        val faulty = Set("v4")
-        val target_views = 1000.to(1020)
-        
-        // Use fold to build a set directly
-        target_views.fold(Set(), (acc1, v) => 
-            faulty.fold(acc1, (acc2, f) => {
-                val voteMsg = { 
-                    view: v, 
-                    seq: v, 
-                    proposal_id: { seq: v, view: v, byzantine: 1 }, 
-                    state_hash: List(), 
-                    sigma: f 
-                }
-                acc2.setAdd(Vote(voteMsg))
-            })
-        )
-    }
 
 
     // ------------------------------------------- Display Utility -------------------------------------------

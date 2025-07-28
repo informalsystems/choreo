@@ -24,9 +24,11 @@ module tendermint{
     valid_round: Round,
     after_prevote_for_first_time: bool,
     precommit_quorum: bool,
-    messages: Set[Message],
     process_id : Node,
     decisions: Round -> Option[Value],
+    proposals: Set[ProposeMsg],
+    prevotes: Set[PreVoteMsg],
+    precommits: Set[PreVoteMsg],
   }
 
   type ProposeMsg = {
@@ -89,6 +91,7 @@ module tendermint{
 
   type Environment = {
     system : Node -> LocalState,
+    message_buffer : Node -> Set[Message],
     active_timeouts : Node -> Option[TimeoutEvent],
     bookkeeping : Bookkeeping,
   }
@@ -101,47 +104,22 @@ module tendermint{
   }
   
   pure def get_proposals(s: LocalState): Set[ProposeMsg] =
-    s.messages.filterMap(m => {
-      match m {
-        | Propose(p) => Some(p)
-        | _ => None
-      }
-    })
+    s.proposals
 
   /// All received PreVotes with a given round and value id
   pure def get_prevotes(s: LocalState, round: Round, id: Option[ValueId]): Set[PreVoteMsg] =
-    s.messages.filterMap(m => {
-      match m {
-        | PreVote(p) => if (p.round == round and p.id == id) Some(p) else None
-        | _ => None
-      }
-    })
+    s.prevotes.filter(p => p.round == round and p.id == id)
 
   pure def get_all_prevotes(s: LocalState): Set[PreVoteMsg] =
-    s.messages.filterMap(m => {
-      match m {
-        | PreVote(p) => Some(p)
-        | _ => None
-      }
-    })
+    s.prevotes
 
   /// All received PreCommits
   pure def get_all_precommits(s: LocalState): Set[PreVoteMsg] =
-    s.messages.filterMap(m => {
-      match m {
-        | PreCommit(p) => Some(p)
-        | _ => None
-      }
-    })
+    s.precommits
 
   /// All received PreCommits with a given round and value id
   pure def get_precommits(s: LocalState, round: Round, id: ValueId): Set[PreVoteMsg] =
-    s.messages.filterMap(m => {
-      match m {
-        | PreCommit(p) => if (p.round == round and p.id == Some(id)) Some(p) else None
-        | _ => None
-      }
-    })
+    s.precommits.filter(p => p.round == round and p.id == Some(id))
 
 
   pure def valid(v: Value): bool = 
@@ -430,8 +408,7 @@ module tendermint{
 
   // -------------------------------------------------------- Message Handlers ------------------------------------------------------------
   pure def process_propose(s: LocalState, msg: ProposeMsg): HandlerOutput = {
-    //val s0 = {... s, messages: s.messages.setAdd(Propose(msg))}
-    val s0 = s
+    val s0 = {... s, proposals: s.proposals.setAdd(msg)}
     val res1 = process_proposal_at_propose_stage(s0, msg)
     val res2 = process_proposal_and_quorum_at_propose_stage(res1.state, msg)
     val res3 = process_proposal_and_quorum_after_prevote_stage_for_the_first_time(res2.state, msg)
@@ -444,8 +421,7 @@ module tendermint{
   }
 
   def process_prevote(s: LocalState, msg: PreVoteMsg): HandlerOutput = {
-    //val s0 = {... s, messages: s.messages.setAdd(PreVote(msg))}
-    val s0 = s
+    val s0 = {... s, prevotes: s.prevotes.setAdd(msg)}
     val res1 = on_prevote_quorum(s0)
     val res2 = process_prevote_quorum_on_prevote_stage(res1.state, msg)
     {
@@ -457,8 +433,7 @@ module tendermint{
   }
 
   def process_precommit(s: LocalState, msg: PreVoteMsg): HandlerOutput = {
-    //val s0 = {... s, messages: s.messages.setAdd(PreCommit(msg))}
-    val s0 = s
+    val s0 = {... s, precommits: s.precommits.setAdd(msg)}
     val res1 = on_precommit_quorum(s0)
     val res2 = process_precommit_quorum_for_the_first_time(res1.state, msg)
     {
@@ -559,7 +534,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
   var s: Environment // Global state of the system
 
   pure def broadcast(env: Environment, msg: Message): Environment = 
-  { ...env, system: env.system.transformValues(s => { ...s, messages: s.messages.setAdd(msg) }) }
+  { ...env, message_buffer: env.message_buffer.transformValues(b => b.setAdd(msg) )}
 
   pure val TIMEOUT_ORDER = Map(ProposeTimeout -> 0, PreVoteTimeout -> 1, PreCommitTimeout -> 2)
   pure def should_replace(t1: TimeoutEvent, t2: TimeoutEvent): bool = {
@@ -633,10 +608,9 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     breakpoint: false,
   }
 
-  pure def initialize_process(n: Node, byz: Set[Message]): LocalState = {
+  pure def initialize_process(n: Node): LocalState = {
     {
     process_id: n,
-    messages: Set(initial_message).union(byz),
     round: 0,
     stage: ProposeStage,
     decision: None,
@@ -647,6 +621,9 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     after_prevote_for_first_time: false,
     precommit_quorum: false,
     decisions: Map(0 -> None, 1 -> None, 2 -> None, 3 -> None, 4 -> None, 5 -> None, 6 -> None),
+    proposals: Set(),
+    prevotes: Set(),
+    precommits: Set(),
     }
   }
 
@@ -679,9 +656,10 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
 
   // -------------------------------- actions --------------------------------
   action init = all {
-    nondet byz = byzantine_messages.powerset().oneOf()
+    nondet byz = byzantine_messages.powerset().filter(s => s.size() > 8).oneOf()
     s' = {
-      system: NODES.mapBy(n => initialize_process(n,byz)),
+      system: NODES.mapBy(n => initialize_process(n)),
+      message_buffer: NODES.mapBy(n => Set(initial_message).union(byz)),
       active_timeouts: NODES.mapBy(n => None),
       bookkeeping: initial_bookkeeping,
     }
@@ -690,7 +668,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
 
   action step_naive = {
     nondet process = NODES.oneOf()
-    val msgs = s.system.get(process).messages
+    val msgs = s.message_buffer.get(process)
     nondet message = msgs.oneOf()
     val message_result = receive_message(s.system.get(process), message)
     all {
@@ -708,7 +686,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
   // Step with post transition non determinism
   action step_o1 = {
     nondet process = CORRECT.oneOf()
-    val msgs = s.system.get(process).messages
+    val msgs = s.message_buffer.get(process)
     val transition_set = msgs.map(m => receive_message(s.system.get(process), m)).filter(m => m.state != s.system.get(process) 
                           or m.external != Set() or m.internal != Set() or m.logging != Set())
     all {
@@ -729,7 +707,8 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
   action step_o2 = {
     nondet process = NODES.oneOf()
     val state = s.system.get(process)
-    val msgs = valid_messages(state, state.messages)
+    val message_buffer = s.message_buffer.get(process)
+    val msgs = valid_messages(state, message_buffer)
     val transition_set = msgs.map(m => receive_message(state, m))
     all {
       transition_set != Set(),
@@ -752,7 +731,8 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     val r = select_representatives(s)
     nondet process = r.oneOf()
     val state = s.system.get(process)
-    val msgs = valid_messages(state, state.messages)
+    val message_buffer = s.message_buffer.get(process)
+    val msgs = valid_messages(state, message_buffer)
     val transition_set = msgs.map(m => receive_message(state, m))
     all {
       transition_set != Set(),
@@ -771,7 +751,6 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
   // -------------------------------- semantic symmetry utilities --------------------------------
   type StateFingerprint = {
     round: Round,
-    messages: Set[Message],
     stage: Stage,
     decision: Option[Value],
     locked_value: Option[Value],
@@ -795,7 +774,6 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     s.fold(init, (acc, state) => {
       val key = {
         round: state.round,
-        messages: state.messages,
         stage: state.stage,
         decision: state.decision,
         locked_value: state.locked_value,
@@ -819,10 +797,25 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
   })
 
   
-  // Witness
-  val no_decision = correct_nodes.forall(n => n.decision == None)
+  // Witnesses
   val validity = correct_nodes.forall(s => s.decision.in(VALID_VALUES.map(v => Some(v)).setAdd(None)))
+  
+  val one_decided = 
+      s.system.values().forall(v => v.decision == None)
 
+  val all_decided =
+      correct_nodes.exists(v => v.decision == None)
+
+  // Witness for a to find a case where a node is in the decided stage while another is prevote
+  // state
+  val stages = 
+      not(
+          and{
+              s.system.values().map(v => v.stage).contains(ProposeStage), 
+              s.system.values().map(v => v.stage).contains(DecidedStage), 
+              s.system.values().map(v => v.stage).contains(PreCommitStage) 
+          }
+      )
 
 
 

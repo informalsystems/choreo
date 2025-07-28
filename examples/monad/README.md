@@ -11,7 +11,7 @@ The file `monadbft.qnt` contains warning annotations under `// Warning` that ind
 
 The model is reactive to messages. Transitions in the state machine are either a message being received or a timeout expiring. 
 Also, all reactions to a single message are done in one atomic step.
-We also keep track of evidence to investigate protocol behavior. This is kept in a `bookkeeping` field, which is not used by the protocol itself, only to check properties.
+We also keep track of evidence to investigate protocol behavior. This is kept in a `logging` field, which is not used by the protocol itself, only to check properties.
 
 ## Properties
 
@@ -22,11 +22,11 @@ We define the following properties:
 To check that they hold in the absence of byzantine nodes, run the simulator:
 
 ``` sh
-$ quint run monadbft.qnt --main test --max-steps=200 --invariant=safety
+$ quint run monadbft.qnt --main test --max-steps=100 --invariant=safety
 ```
 
 ``` sh
-$ quint run monadbft.qnt --main test --max-steps=200 --invariant=ntf
+$ quint run monadbft.qnt --main test --max-steps=100 --invariant=ntf
 ```
 to disable timeout events in the simulator, run with the option `--step=step_no_timeout`
 
@@ -35,5 +35,5 @@ to disable timeout events in the simulator, run with the option `--step=step_no_
 We provide witnesses to show interesting execution scenarios. To look for a case where a block is reproposed in a subsequent view, run:
 
 ``` sh
-$ quint run monadbft.qnt --main test --max-steps=200 --invariant=reproposal
+$ quint run monadbft.qnt --main test --max-steps=100 --invariant=reproposal
 ```

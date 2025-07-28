@@ -4,14 +4,62 @@
  *
  * [1]: https://drive.google.com/file/d/1y_7ddr8oNOknTQYHzXeeMD2ProQ0WjMs/view
  *
- * Josef Widder, Gabriela Moreira
+ * Josef Widder, Gabriela Moreira and Yassine Boukhari 
  * Informal Systems, 2025
  */
 
 module alpenglow {
-  import basicSpells.* from "./basicSpells"
+  import basicSpells.* from "lib/basicSpells"
+  import statemachine(processes = Set()) as csmi from "statemachine"
 
+  // -------------------------------------  Constants -------------------------------------------------
+  /// Set of correct processes (non Byzantine)
+  const correct: Set[ProcessID]
+  /// Set of processes that follow the algorithm but might fail in a benign way
+  const good: Set[ProcessID]
+  /// Set of Byzantine processes
+  const byzantine: Set[ProcessID]
+  /// Set of blocks
+  const correctBlocks: Set[Block]
+  /// Set of Byzantine blocks
+  const byzantineBlocks: Set[Block]
+  /// Slots for which this model considers votes
+  const aliveSlots: Set[Slot]
+  /// Hashes for which this model considers votes
+  const aliveHashes: Set[Blockhash]
+  
+  //---------------------------------------------------------------------------------------------------
   type ProcessID = str
+  //
+  // Wiring into the reusable consensus state machine interface
+  //
+
+  type TimeoutEventData = Slot // TODO not sure what timeouts they start
+
+  type Effect =
+    | ScheduleEventTimeout(TimeoutEventData) // might be multiple from one function call
+    | ExcludeTimeout(TimeoutEventData)
+    | Broadcast(Message)
+
+    /// Table 4 (Alpenglow’s voting messages)
+  type Message =
+    | NotarVoteMsg(BlockReference)
+    | NotarFallBackVoteMsg(BlockReference)
+    | SkipVoteMsg(Slot)
+    | SkipFallbackVoteMsg(Slot)
+    | FinalVoteMsg(Slot)
+
+  /// Messages on the network carry the sender 
+  type NetworkMsg = {
+    sender: ProcessID,
+    msg: Message,
+  }
+  type LocalState = csmi::LocalState[ProcessID, State]
+  type Logging = {}
+  type Transition = csmi::Transition[LocalState, Effect]
+  type Transitions = csmi::Transitions[Transition]
+  type Environment = csmi::Environment[ProcessID, State, Message, TimeoutEventData, Logging, {}]
+  type LocalContext = csmi::LocalContext[Message, TimeoutEventData, {}]
 
   // ------------------------------------- Data Types ------------------------------------------------
   type Slot = int
@@ -36,13 +84,6 @@ module alpenglow {
     | ItsOver
     | BadWindow
  
-  /// Table 4 (Alpenglow’s voting messages)
-  type Message =
-    | NotarVoteMsg(BlockReference)
-    | NotarFallBackVoteMsg(BlockReference)
-    | SkipVoteMsg(Slot)
-    | SkipFallbackVoteMsg(Slot)
-    | FinalVoteMsg(Slot)
 
   type Certificate =
     | FastFinalizationCertificate(BlockReference)
@@ -54,19 +95,12 @@ module alpenglow {
   
   /// Local state of a process
   /// Fields are lists indexed by slot
-  type LocalState = {
+  type State = {
     pendingBlocks: List[Option[Block]],
     state: List[Set[SlotObject]],
-    pid: ProcessID, // Process ID of the process 
   }
 
   // -------------------------------------  State Machine Related Types -------------------------------------
-  type TimeoutEventData = Slot // TODO not sure what timeouts they start
-
-  type Effect =
-    | ScheduleEventTimeout(TimeoutEventData) // might be multiple from one function call
-    | ExcludeTimeout(TimeoutEventData)
-    | Broadcast(Message)
 
 
   type Bookkeeping
@@ -84,28 +118,11 @@ module alpenglow {
   
   type ListenerOutput = Set[Result]
 
-  /// Messages on the network carry the sender (the broadcast call in the pseudo code
-  /// doesn't carry the sender, so does our encoding of the consensus main loop)
-  type NetworkMsg = {
-    sender: ProcessID,
-    msg: Message,
-  }
+
 
   
   // ----------------------------------------------  Constants and utility variables ----------------------------------------------
-  /// Set of correct processes (non Byzantine)
-  const correct: Set[ProcessID]
 
-  /// Set of processes that follow the algorithm but might fail in a benign way
-  const good: Set[ProcessID]
-
-  /// Set of Byzantine processes
-  const byzantine: Set[ProcessID]
-
-  /// Set of blocks
-  const correctBlocks: Set[Block]
-  /// Set of Byzantine blocks
-  const byzantineBlocks: Set[Block]
 
   /// Set of all blocks
   pure val allBlocks = correctBlocks.union(byzantineBlocks)
@@ -115,10 +132,6 @@ module alpenglow {
 
   pure val maxSlot = allBlocks.fold(-1, (s, x) => max(x.slot, s))
 
-  /// Slots for which this model considers votes
-  const aliveSlots: Set[Slot]
-  /// Hashes for which this model considers votes
-  const aliveHashes: Set[Blockhash]
   
   // Definition of byzantine messages
   pure val byzMessages = tuples(aliveSlots, aliveHashes).map(((slot, hash)) =>
@@ -576,26 +589,31 @@ module alpenglow {
   ): ListenerOutput =
     val slot = input.now
     val msgs = input.msgBuffer
-    val candidate = {
-        val s1 = trySkipWindow(ls, slot)
-        if (not(ItsOver.in(s1.post.state[slot])))
-          // Skip-fallback vote
-          val output = s1.output.union(Set(Broadcast(SkipFallbackVoteMsg(slot))))
-          { output: output, post: addObjects(s1.post, slot, Set(BadWindow)) }
-        else
-          s1
-      }
-    Set(candidate)
+    val condition = safeToSkipCondition(ls.pid, msgs, slot)
+    if (not(condition))
+      Set()
+    else
+      val candidate = {
+          val s1 = trySkipWindow(ls, slot)
+          if (not(ItsOver.in(s1.post.state[slot])))
+            // Skip-fallback vote
+            val output = s1.output.union(Set(Broadcast(SkipFallbackVoteMsg(slot))))
+            { output: output, post: addObjects(s1.post, slot, Set(BadWindow)) }
+          else
+            s1
+        }
+      Set(candidate)
 
 
   pure def listener(ls: LocalState, input: ListenerInput): ListenerOutput = 
-    Set(
+    val res = Set(
       blockReceived(ls, input),
-      //timeout(ls, input),
+      timeout(ls, input),
       blockNotarized(ls, input),
       parentReady(ls, input),
       safeToNotar(ls, input),
       safeToSkip(ls, input)
-    ).flatten().filter(out => out.output.size()>0 or out.post != ls) // Flatten the set of sets into a single set of results
-  
+    ).flatten().filter(out => out.output.size() > 0 or out.post != ls) // Flatten the set of sets into a single set of results
+    res
+
 }

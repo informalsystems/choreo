@@ -509,7 +509,6 @@ module tendermint {
 
 
     var s : GlobalState
-
     action init = all {
         nondet byz = byzantine_messages.powerset().oneOf()
         s' = {
@@ -598,7 +597,23 @@ module tendermint {
     val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
     val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
         p1.decision == None or p2.decision == None or p1.decision == p2.decision})
-    val no_decision = s.system.values().forall(v => v.decision == None)
+    
+    val one_decided = 
+        s.system.values().forall(v => v.decision == None)
+
+    val all_decided =
+        correct_nodes.exists(v => v.decision == None)
+
+    // Witness for a to find a case where a node is in the decided stage while another is prevote
+    // state
+    val stages = 
+        not(
+            and{
+                s.system.values().map(v => v.stage).contains(ProposeStage), 
+                s.system.values().map(v => v.stage).contains(DecidedStage), 
+                s.system.values().map(v => v.stage).contains(PreCommitStage) 
+            }
+        )
 
             
     

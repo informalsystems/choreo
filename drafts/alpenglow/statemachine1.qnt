@@ -31,6 +31,60 @@ module consensus {
           { ...s, internalBuffer: s.internalBuffer.set(v, s.internalBuffer.get(v).exclude(Set(slot))) }
   })
 
+  action listenerA(ls: LocalState, input: ListenerInput):bool = all {
+    any {
+      {
+        val transitions = blockReceived(ls, input).filter(out => out.output.size()>0 or out.post != ls)
+        all {
+          transitions.size() > 0,
+          nondet transition = oneOf(transitions)
+          s' = applyEffect(s, ls.pid, transition),
+        }
+      },
+      {
+        val transitions = timeout(ls, input).filter(out => out.output.size()>0 or out.post != ls)
+        all {
+          transitions.size() > 0,
+          nondet transition = oneOf(transitions)
+          s' = applyEffect(s, ls.pid, transition),
+        }
+      },
+      {
+        val transitions = blockNotarized(ls, input).filter(out => out.output.size()>0 or out.post != ls)
+        all {
+          transitions.size() > 0,
+          nondet transition = oneOf(transitions)
+          s' = applyEffect(s, ls.pid, transition),
+        }
+      },
+      {
+        val transitions = parentReady(ls, input).filter(out => out.output.size()>0 or out.post != ls)
+        all {
+          transitions.size() > 0,
+          nondet transition = oneOf(transitions)
+          s' = applyEffect(s, ls.pid, transition),
+        }
+      },
+      {
+        val transitions = safeToNotar(ls, input).filter(out => out.output.size()>0 or out.post != ls)
+        all {
+          transitions.size() > 0,
+          nondet transition = oneOf(transitions)
+          s' = applyEffect(s, ls.pid, transition),
+        }
+      },
+      {
+        val transitions = safeToSkip(ls, input).filter(out => out.output.size()>0 or out.post != ls)
+        all {
+          transitions.size() > 0,
+          nondet transition = oneOf(transitions)
+          s' = applyEffect(s, ls.pid, transition),
+        }
+      },           
+    }
+  }
+
+
   //
   //
   // State Machine
@@ -38,7 +92,8 @@ module consensus {
   //
   var s: Environment
   var counter: int
-  val allMessages = s.msgBuffer.values().flatten() // all messages sent so far 
+  val allMessages = s.msgBuffer.values().flatten().
+                    union(byzNetworkMsgs) // all messages sent so far 
 
 
 
@@ -72,23 +127,43 @@ module consensus {
 
   /// Main step action. Includes all behavior
   action step = all {
-    //counter < 20,
+    counter < 10,
     counter' = counter + 1,
     any {
       nondet v = oneOf(benevolent)
       val input = {
-        msgBuffer: s.msgBuffer.get(v),
+        msgBuffer: s.msgBuffer.get(v).union(byzNetworkMsgs),
         internalBuffer: s.internalBuffer.get(v),
         now: s.now,
       }
       val ls = s.system.get(v)
-      nondet transition = listener(ls, input).oneOf()
+      val transitions = listener(ls, input)
+      all {
+      transitions.size() > 0, // we have a transition to apply
+      nondet transition = oneOf(transitions)
       s' = applyEffect(s, v, transition),
+      },
+      tick,
+    }
+  }
+  /// Main step action. Includes all behavior
+  action stepA = all {
+    counter < 10,
+    counter' = counter + 1,
+    any {
+      nondet v = oneOf(benevolent)
+      val input = {
+        msgBuffer: s.msgBuffer.get(v).union(byzNetworkMsgs),
+        internalBuffer: s.internalBuffer.get(v),
+        now: s.now,
+      }
+      val ls = s.system.get(v)
+      listenerA(ls, input),
       tick,
     }
   }
 
-    /// Witness to find a run where a block is fast finalized
+/// Witness to find a run where a block is fast finalized
   val fastFinalizedWitness =
     allBlocks.forall(b => not(isCertified(FastFinalizationCertificate(b.reference()), allMessages)))
   val timeoutWitness = 
