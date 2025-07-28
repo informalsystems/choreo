@@ -453,6 +453,39 @@ module tendermint{
     }
   }
 
+  pure def handle_timeout_(s: LocalState, t: TimeoutEvent): HandlerOutput = {
+    match t.kind {
+      | ProposeTimeout => {
+        // line 55
+        if (s.round != t.round or s.stage != ProposeStage) no_effects(s) else
+
+        {
+          state: { ...s, stage: PreVoteStage },
+          external: Set(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))),
+          internal: Set(StartTimeout({ kind: PreVoteTimeout, round: s.round })),
+          logging: Set()
+        }
+      }
+      | PreVoteTimeout => {
+        // line 61
+        if (s.round != t.round or s.stage != PreVoteStage) no_effects(s) else
+
+        {
+          state: { ...s, stage: PreCommitStage },
+          external: Set(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None }))),
+          internal: Set(StartTimeout({ kind: PreCommitTimeout, round: s.round })),
+          logging: Set()
+        }
+      }
+      | PreCommitTimeout => {
+        // line 65
+        if (s.round != t.round) no_effects(s) else
+
+        s.start_round(s.round + 1)
+      }
+    }
+  }
+
 pure def combined_upon_conditions(s: LocalState, m: Message): bool =
   match m {
     | Propose(p) =>
@@ -665,8 +698,10 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     }
   }
 
-  action step = step_naive
+  action step = step_with_timeout // step_naive // step_o1 // step_o2 // step_o3
 
+
+  type Event = Ext(Message) | Inter(TimeoutEvent)
   action step_naive = {
     nondet process = oneOf(CORRECT.filter(v => s.message_buffer.get(v)!= Set()))
     val msgs = s.message_buffer.get(process)
@@ -675,7 +710,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     all {
       // only for this draft, as I want a finite state space
       s' = apply_effect(
-        { ...s, system: s.system.set(process, message_result.state) },
+        { ...s, system: s.system.set(process, message_result.state)},
         process,
         message_result.external,
         message_result.internal,
@@ -683,7 +718,36 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
       )
     }
   }
+  
+  action step_with_timeout = {
+    nondet process = oneOf(CORRECT.filter(v => s.active_timeouts.get(v) != None or s.message_buffer.get(v) != Set()))
+    val timeout_event = s.active_timeouts.get(process)
+    val message_buffer = s.message_buffer.get(process)
+    val te = match timeout_event {
+      | None => Set()
+      | Some(t) => Set(Inter(t))
+    }
+    val msgs = s.message_buffer.get(process)
+    val events = te.union(msgs.map(m => Ext(m)))
+    all {
+      events != Set(),
+      nondet event = events.oneOf()
+      val res = match event {
+        | Ext(m) => receive_message(s.system.get(process), m)
+        | Inter(t) => handle_timeout_(s.system.get(process), t)
+      }
+      s' = apply_effect(
+        { ...s, system: s.system.set(process, res.state) },
+        process,
+        res.external,
+        res.internal,
+        res.logging
+      )
+    }
 
+
+  }
+  
   // Step with post transition non determinism
   action step_o1 = {
     nondet process = CORRECT.oneOf()

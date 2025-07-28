@@ -2,9 +2,6 @@
 module tendermint {
     import basicSpells.* from "lib/basicSpells"
 
-    //import glyphNetwork as GNet from "lib/glyph"
-    //import glyphDriver(processes = NODES) as GD from "lib/glyph"
-    //import glyphsBase as GB from "lib/glyph"
 
     type Round = int    
     type Stage = ProposeStage | PreVoteStage | PreCommitStage | DecidedStage
@@ -109,333 +106,41 @@ module tendermint {
     }
 
     pure def id(v: Value): ValueId = { hashed: v }
-
-
-    // Broadcast Pre-Vote Block and start timeout (based on the state and messages can this 
-    // transition be enabled?)
-    // the core idea is that each event Listener is structured as follows:
-    // State guards: predicates on the current state only
-    // Message guards: predicates on message soup that can use the state as context
-    // Effect builder: function to produce the effects 
-
-    
-    // Naming convention for listeners -> on_<stage>_<event>
-    pure def on_propose_proposal(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-        
-        val state_guard = and {
-            s.stage == ProposeStage
-        }
-
-        // Message guards: predicates on the messages that can use the state as context
-        def message_guard = (p) => and {
-            p.valid_round == -1,
-            p.src == PROPOSER.get(s.round),
-        } 
-
-
-        // Apply Guards
-        val proposals = messages.get_proposals()
-        val enabled_proposals = proposals.filter(p => and {
-            message_guard(p),
-            state_guard
-        })
-
-        def effect_builder = (p) => {
-            // Broadcast the PreVote message for the proposal
-            if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
-                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) }))))
-            } else {
-                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))))
-            }
-        } 
-        
-        
-        // Map the enabled proposals to effects and teh corresponding state updates
-        val outputs = enabled_proposals.map(p => {
-            state: { ...s, stage: PreVoteStage, after_prevote_for_first_time: true },
-            effects: effect_builder(p),
-            // TODO -> add logging effect to collect evidence
-            }   
-        )
-        outputs
-    }
-
-
-    pure def on_propose_valid_quorum(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-        
-        val state_guard = and {
-            s.stage == ProposeStage
-        }
-
-        def message_guard = (p) => and {
-            p.src == PROPOSER.get(s.round),
-            p.valid_round >= 0,
-            p.valid_round < s.round,
-        }
-
-        
-        val proposals = messages.get_proposals()
-        val pre_votes = messages.get_pre_votes()
-
-        val enabled_proposals = proposals.filter(p => and {
-            message_guard(p),
-            state_guard,
-            pre_votes.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).size() >= 2 * F + 1 // quorum size is F + 1
-        })
-
-        def effect_builder = (p) => {
-            // Broadcast the PreVote message for the proposal
-            if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
-                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))}))))
-            } else {
-                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))))
-            }
-        } 
-
-        val outputs = enabled_proposals.map(p => {
-            state: { ...s, stage: PreVoteStage, after_prevote_for_first_time: true },
-            effects: effect_builder(p),
-            // TODO -> add logging effect to collect evidence
-        })
-        outputs
-
-    }
-
-    pure def on_prevote_valid_quorum(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-        
-        val state_guard = and {
-            s.stage == PreVoteStage,
-            s.after_prevote_for_first_time
-        }
-
-        def message_guard = (p) => and {
-            p.round == s.round,
-        }
-
-        
-        val pre_votes = messages.get_pre_votes()
-
-        val enabled_pre_votes = pre_votes.filter(p => and {
-            message_guard(p),
-            state_guard
-        })
-
-        val quorum = (enabled_pre_votes.map(p => p.src).size() >= 2 * F + 1)
-        val output = 
-            if (quorum) {
-                // Start the timeout for PreVote
-                Set({ effects: Set(Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round }))), 
-                state: { ...s, stage: PreCommitStage, after_prevote_for_first_time: false }})
-            } else {
-                Set()
-            }
-        output
-    }
-
-    pure def on_prevote_first_quorum(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-        
-        val state_guard = and {
-            s.stage == PreVoteStage,
-            s.after_prevote_for_first_time
-        }
-
-        def message_guard = (pv) => and {
-            pv.round == s.round,
-        }
-
-        val pre_votes = messages.get_pre_votes()
-        val enabled_pre_votes = pre_votes.filter(pv => and {
-            message_guard(pv),
-            state_guard
-        })
-
-        val quorum = (enabled_pre_votes.map(pv => pv.src).size() >= 2 * F + 1)
-
-        val output = 
-            if (quorum) {
-                // Start the timeout for PreVote
-                Set({ effects: Set(Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round }))), 
-                state: { ...s, stage: PreCommitStage, after_prevote_for_first_time: false }})
-            } else {
-                Set()
-            }
-        
-        output
-    }
-
-    pure def on_prevote_commit_ready(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-               
-         val state_guard = and {
-            s.stage.in(Set(PreVoteStage)),
-            s.after_prevote_for_first_time
-        }
-
-        def message_guard = (p) => and {
-            p.src == PROPOSER.get(s.round),   
-        }
-
-        val pre_votes = messages.get_pre_votes()
-        val proposals = messages.get_proposals()
-        val enabled_proposals = proposals.filter(p => and {
-            message_guard(p),
-            state_guard,
-            pre_votes.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).size() >= 2 * F + 1 // quorum size is F + 1
-        })
-
-        val outputs = enabled_proposals.map(p => {
-            state: { ...s, stage: PreCommitStage, valid_value: Some(p.proposal),
-                    locked_value: Some(p.proposal), locked_round: p.round, 
-                    valid_round: s.round},
-            effects: Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: p.round, id: Some(id(p.proposal)) })))),
-            // TODO -> add logging effect to collect evidence
-        })
-        outputs
-    }
-
-    pure def on_precommit_valid_quorum(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-        
-        val state_guard = and {
-            s.stage == PreCommitStage,
-            s.after_prevote_for_first_time
-        }
-
-        def message_guard = (p) => and {
-            p.src == PROPOSER.get(s.round),   
-        }
-
-        val pre_votes = messages.get_pre_votes()
-        val proposals = messages.get_proposals()
-        val enabled_proposals = proposals.filter(p => and {
-            message_guard(p),
-            state_guard,
-            pre_votes.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).size() >= 2 * F + 1 // quorum size is F + 1
-        })
-
-        val outputs = enabled_proposals.map(p => {
-            state: { ...s,  valid_value: Some(p.proposal), valid_round: s.round},
-            effects: Set(),
-            // TODO -> add logging effect to collect evidence
-        })
-        outputs
-    }
-
-    // This is relative to nil block broadcast 
-    pure def on_prevote_nil_quorum(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-        
-        val state_guard = and {
-            s.stage == PreVoteStage
-        }
-        def message_guard = (p) => and {
-            p.round == s.round,
-            p.id == None
-        }
-        
-        val pre_votes = messages.get_pre_votes()
-        val enabled_pre_votes = pre_votes.filter(p => and {
-            message_guard(p),
-            state_guard
-        })
-        
-        // TODO: review this
-        val quorums = enabled_pre_votes.map(p => p.src).size() >= 2 * F + 1 
-        val outputs = 
-            if (quorums) {
-                Set({
-                    effects: Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))),
-                    state: { ...s, stage: PreCommitStage}
-                })
-            } else {
-                Set()
-            }
-        outputs
-    }
-
-    pure def on_precommit_first_quorum(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-        
-        val state_guard = and {
-            not(s.precommit_quorum)
-        }
-
-        def message_guard = (p) => and {
-            p.round == s.round
-            }
-
-        val pre_commits = messages.get_pre_commits()
-        val enabled_pre_commits = pre_commits.filter(p => and {
-            message_guard(p),
-            state_guard
-        })
-
-        val quorum = (enabled_pre_commits.map(p => p.src).size() >= 2 * F + 1)
-
-        val output = 
-            if (quorum) {
-                // Start the timeout for PreCommit
-                //TODO: s.round and p.round are the same 
-                Set({ effects: Set(Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round }))), 
-                    state: { ...s, precommit_quorum: true }})
-            } else {
-                Set()
-            }
-        
-        output
-    }
-
-    pure def on_precommit_quorum(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
-        
-        val state_guard = and {
-            s.decision == None,
-        }
-
-        def message_guard = (p) => and {
-            p.src == PROPOSER.get(s.round),
-            p.proposal.valid()   
-        }
-
-        val pre_commits = messages.get_pre_commits()
-        val proposals = messages.get_proposals()
-        val enabled_proposals = proposals.filter(p => and {
-            message_guard(p),
-            state_guard,
-            pre_commits.filter(q => q.id == Some(p.proposal.id()) and q.round == p.round).map(p => p.src).size() >= 2 * F + 1 // quorum size is F +
-        })
-        val outputs = enabled_proposals.map(p => {
-            state: { ...s, decision: Some(p.proposal), stage: DecidedStage},
-            effects: Set(Ext(Finalize)),
-            // TODO -> do we need an effect for decision? to stop execution
-            // TODO -> add logging effect to collect evidence
-        })
-        outputs
-    }
-
 // ------------------------------------------------------
+
+    pure def start_round(
+        s: LocalState,
+        round: Round
+    ): ListenerOutput =
+        val s1 = {
+            ...s,
+            stage: ProposeStage,
+            precommit_quorum: false,
+        } 
+
+        pure val output =
+            if (s.process_id == PROPOSER.get(round)) {
+            pure val proposal =
+                if (s.valid_value != None)
+                    s.valid_value.unwrap()
+                else
+                    VALUES.get(round)
+
+            Set(
+                Ext(
+                    Broadcast(
+                        Propose({ src: s.process_id, round: s.round, proposal: proposal, valid_round: s.valid_round })
+                    )
+                )
+            )
+            } else {
+
+                Set(Inter(StartTimeout({ kind: ProposeTimeout, round: s.round })))
+            }
+        { 
+            effects: output,
+            state: s1
+        }
 
     pure def upon_proposal_in_propose(
         s: LocalState,
@@ -533,9 +238,74 @@ module tendermint {
         }
 
         // Do we have a quorum of PreVotes in the current round
-        Set()
+        def message_guard = (pv) => (pv.round == s.round)
+        val quorum = messages.get_pre_votes().filter(pv => and {
+            message_guard(pv),
+        }).size() >= 2 * F + 1 // quorum size is F + 1
 
+        if (quorum and state_guard) {
+            // If we have a quorum, we can move to precommit stage
+            val outputs = Set({
+                state: { ...s, stage: PreCommitStage},
+                effects: Set(Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
+            })
+            outputs
+        } else {
+            Set()
+        } 
+    }
 
+    pure def upon_quorum_nil_prevotes(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+        
+        val state_guard = and {
+            s.stage == PreVoteStage,
+        }
+
+        // Do we have a quorum of PreVotes in the current round
+        def message_guard = (pv) => (pv.round == s.round and pv.id == None)
+        val prevotes = messages.get_pre_votes().filter(pv => message_guard(pv))
+        val quorum = prevotes.size() >= 2 * F + 1
+
+        if (quorum and state_guard) {
+            // If we have a quorum, we can move to precommit stage
+            val outputs = Set({
+                state: { ...s, stage: PreCommitStage},
+                effects: Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
+                            , Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
+            })
+            outputs
+        } else {
+            Set()
+        }
+    }
+            
+    pure def upon_quorum_precommits_any(
+        s: LocalState,
+        messages: Set[Message]
+    ): Set[ListenerOutput] = {
+        
+        val state_guard = and {
+            s.stage == PreCommitStage,
+        }
+
+        // Do we have a quorum of PreCommits in the current round
+        def message_guard = (pc) => (pc.round == s.round)
+        val quorum = messages.get_pre_commits().filter(pc => and {
+            message_guard(pc),
+        }).size() >= 2 * F + 1 // quorum size is F + 1
+
+        if (quorum and state_guard) {
+            // If we have a quorum, we can move to decided stage
+            val outputs = Set(
+                start_round(s, s.round + 1)
+            )
+            outputs
+        } else {
+            Set()
+        } 
     }
 
     pure def upon_proposal_in_prevote_commit(
@@ -649,41 +419,84 @@ module tendermint {
         
         outputs
     }
-            
-        
-        
 
-
-    pure def main_listener_2(
+    pure def on_propose_timeout(
         s: LocalState,
-        messages: Set[Message]
+        t: Set[TimeoutEvent]
     ): Set[ListenerOutput] = {
-        // The main listener that combines all the rules
-        val outputs =
-            Set(
-                on_propose_proposal(s, messages),
-                on_propose_valid_quorum(s, messages),
-                //on_prevote_valid_quorum(s, messages),
-                on_prevote_first_quorum(s, messages),
-                on_precommit_valid_quorum(s, messages),
-                on_prevote_commit_ready(s, messages),
-                on_prevote_nil_quorum(s, messages),
-                on_precommit_first_quorum(s, messages),
-                on_precommit_quorum(s, messages)
-            ).flatten().filter(o => o.effects.size() > 0 or o.state != s) // Filter out no-op outputs
-        // Return the outputs
-        outputs
+
+        val candidates = t.filter(t => t.round == s.round and t.kind == ProposeTimeout)
+        val guard = and {
+            candidates.size() > 0,
+            s.stage == ProposeStage,
+        }
+
+        if (guard)
+
+            Set({
+                effects: Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
+                            , Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round }))),
+                state: { ...s, stage: PreVoteStage}
+            }
+            )
+        else 
+            Set()
     }
 
+    pure def on_prevote_timeout(
+        s: LocalState,
+        t: Set[TimeoutEvent]
+    ): Set[ListenerOutput] = {
+        val candidates = t.filter(t => t.round == s.round and t.kind == PreVoteTimeout)
+        val guard = and {
+            candidates.size() > 0,
+            s.stage == PreVoteStage,
+        }
+        if (guard)
+
+            Set({
+                effects: Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
+                            , Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round }))),
+                state: { ...s, stage: PreCommitStage}
+            }
+            )
+        else 
+            Set()
+    }
+
+    pure def on_precommit_timeout(
+        s: LocalState,
+        t: Set[TimeoutEvent]
+    ): Set[ListenerOutput] = {
+        val candidates = t.filter(t => t.round == s.round and t.kind == PreCommitTimeout)
+        val guard = and {
+            candidates.size() > 0,
+            s.stage == PreCommitStage,
+        }
+        if (guard)
+            Set(
+                start_round(s, s.round + 1)
+            )
+        else 
+            Set()
+    }
+    
     pure def main_listener(
         s: LocalState,
-        messages: Set[Message]
+        messages: Set[Message],
+        timeouts: Set[TimeoutEvent]
     ): Set[ListenerOutput] =
         val outputs = Set (
             upon_proposal_in_propose(s,messages),
             upon_proposal_in_propose_prevote(s,messages),
             upon_proposal_in_precommit_no_decision(s,messages),
-            upon_proposal_in_prevote_commit(s,messages)
+            upon_proposal_in_prevote_commit(s,messages),
+            //upon_quorum_prevotes_any(s,messages), 
+            upon_quorum_nil_prevotes(s,messages),
+            //upon_quorum_precommits_any(s,messages), //Actually it should be checked if we have a valid quorum or not. 
+            on_propose_timeout(s, timeouts),
+            on_prevote_timeout(s, timeouts),
+            on_precommit_timeout(s, timeouts)
         ).flatten().filter(o => o.effects.size() > 0 or o.state != s)
         outputs
 
@@ -742,6 +555,7 @@ module tendermint {
     type GlobalState = {
         system: Node -> LocalState,
         message_buffer: Node -> Set[Message],
+        internal_buffer: Node -> Set[TimeoutEvent],
         logging: Bookkeeping,
     }
 
@@ -752,7 +566,34 @@ module tendermint {
     { ...env,
       message_buffer: env.message_buffer.transformValues(v => v.setAdd(msg))
     }
-  }
+    }
+
+    pure val TIMEOUT_ORDER = Map(ProposeTimeout -> 0, PreVoteTimeout -> 1, PreCommitTimeout -> 2)
+    pure def should_replace(t1: TimeoutEvent, t2: TimeoutEvent): bool = {
+        TIMEOUT_ORDER.get(t2.kind) < TIMEOUT_ORDER.get(t1.kind) or t2.round > t1.round
+    }
+
+    pure def add_timeout(
+        env: GlobalState,
+        v: Node,
+        timeout: TimeoutEvent,
+        should_replace: (TimeoutEvent, TimeoutEvent) => bool
+    ): GlobalState = {
+        val current = env.internal_buffer.get(v)
+        if (current.empty())
+            { ...env,
+              internal_buffer: env.internal_buffer.put(v, Set(timeout))
+            }
+        else if (current.exists(t => should_replace(t, timeout)))
+            { ...env,
+              internal_buffer: env.internal_buffer.put(v, Set(timeout))
+            }  
+        else 
+            env
+        
+       
+    } 
+    
     pure def apply_effects(
         env: GlobalState,
         n: Node,
@@ -767,7 +608,7 @@ module tendermint {
                 }
             | Inter(inte) =>
                 match inte {
-                    | StartTimeout(event) => currentEnv
+                    | StartTimeout(event) => add_timeout(currentEnv, n, event, should_replace)
                 }
             | Log(log) =>
                 match log {
@@ -784,6 +625,7 @@ module tendermint {
         nondet byz = byzantine_messages.powerset().oneOf()
         s' = {
             system: NODES.mapBy(v => initialize_process(v)),
+            internal_buffer: NODES.mapBy(v => Set()),
             message_buffer: NODES.mapBy(v => Set(initial_message).union(byz)),
             logging: initial_bookkeeping,
         }
@@ -792,8 +634,9 @@ module tendermint {
     action step = {
         nondet process = oneOf(CORRECT.filter(v => s.message_buffer.get(v)!= Set()))
         val msgs = s.message_buffer.get(process)
+        val timeouts = s.internal_buffer.get(process)
         val current_state = s.system.get(process)
-        val valid_transitions = main_listener(current_state, msgs)
+        val valid_transitions = main_listener(current_state, msgs, timeouts)
         all {
             valid_transitions != Set(),
             // choose one of the valid transitions
@@ -810,7 +653,7 @@ module tendermint {
         nondet process = r.oneOf() 
         val msgs = s.message_buffer.get(process)
         val current_state = s.system.get(process)
-        val valid_transitions = main_listener(current_state, msgs)
+        val valid_transitions = main_listener(current_state, msgs, Set())
         all {
             valid_transitions != Set(),
             // choose one of the valid transitions

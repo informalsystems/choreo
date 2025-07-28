@@ -1110,8 +1110,58 @@ module monadbft{
             proposals.exists(p =>
                 timeouts.forall(t => t.view != p.view)
             )
-        
 
+    
+    /// Witness: search for a QC that was not followed by a proposal referencing it.
+    def missing_qc =
+        val votes = csmi::s.logging.msgHistory.filterMap(x => match x {
+            | Vote(v) => Some(v)
+            | _ => None
+        })
+        val props = csmi::s.logging.msgHistory.filterMap(x => match x {
+            | Prop(p) => Some(p)
+            | _ => None
+        })
+        // Group views by view and proposal_id
+        val grouped_votes = votes.groupBy(v => (v.view, v.proposal_id))
+        grouped_votes.values().exists(entry => {
+            val view = entry.map(v => v.view).getOnlyElement()
+            val quorum = entry.size() >= Q
+
+            val skipped = props.exists(
+                p => p.block.qc.view > view
+            )
+
+            val not_used = props.forall(
+                p => p.block.qc.view != view
+            )
+            quorum and skipped and not_used and view > 4
+        })
+
+    def missing_qc_w = not(missing_qc)
+    
+    /// Witness: search for a disappearing TIP.
+    def missing_tip =
+        val props = csmi::s.logging.msgHistory.filterMap(x => match x {
+            | Prop(p) => Some(p)
+            | _ => None
+        })
+        val tcs = props.filter(p => p.tc != None).map(p => (p.view,p.tc.unwrap()))
+        // find a pair of (view, tc)
+        tcs.exists(pair => {
+            val view1 = pair._1
+            val tc1 = pair._2
+            tc1.high_tip != None and
+            tcs.exists(pair2 => {
+                val view2 = pair2._1
+                val tc2 = pair2._2
+                view1 < view2 and
+                tc2.high_tip != None and
+                tc1.high_tip.unwrap().view > tc2.high_tip.unwrap().view
+            })
+        })
+                
+    def missing_tip_w = not(missing_tip)
 
 
     pure val byz_messages = {
