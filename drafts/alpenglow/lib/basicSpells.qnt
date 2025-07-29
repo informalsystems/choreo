@@ -232,6 +232,10 @@ module basicSpells {
     m.keys().mapBy(k => f(m.get(k)))
   }
 
+  pure def transformValuesWithDefault(m: a -> b, f: (b) => c, default: c): a -> c = {
+    m.keys().mapBy(k => if (m.has(k)) f(m.get(k)) else default)
+  }
+
   run transformValuesTest = {
     pure val m = Map("a" -> 1, "b" -> 2)
     assert(m.transformValues(x => x + 1) == Map("a" -> 2, "b" -> 3))

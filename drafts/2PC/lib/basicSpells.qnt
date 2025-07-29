@@ -386,34 +386,4 @@ module basicSpells {
       }
     })
   }
-
-  pure def groupBy(s: Set[a], f: (a) => b): b -> Set[a] = {
-    val init : b -> Set[a] = Map()
-    s.fold(init, (acc, e) => {
-      val key = f(e)
-      acc.setByWithDefault(key,(s) => s.union(Set(e)), Set())
-    })
-  }
-
-  pure def takeOne(s: Set[a]): Option[a] = {
-    // if the set is empty, return None
-    if (s == Set()) {
-      None
-    } else {
-      // otherwise, convert the set to a list and take the first element
-      val l = s.fold(List(), (acc, e) => acc.append(e))
-      Some(l[0])
-    }
-  }
-
-  /*
-  pure def toList(s: Set[a]): List[a] = {
-    s.fold(List(), (acc, e) => acc.append(e))
-  }
-  */
-
-
-  pure def setByAll(m: a -> b, f: (a, b) => c): a -> c = {
-    m.keys().mapBy(k => f(k, m.get(k)))
-  }
 }
