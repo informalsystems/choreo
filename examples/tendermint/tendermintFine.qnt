@@ -661,7 +661,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
   }
 
   // Card(powset)= 4096
-  val byzantine_messages = {
+  val byzantine_messages_1 = {
     val rounds = Set(0) 
     val byzantine_proposals = rounds.map(r => {
       tuples(FAULTY, Set("v0","v1","v2"), rounds.setAdd(-1)).map(((f, v, vr)) => {
@@ -684,12 +684,25 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
     // Reintegrate byzantine proposals
     Set(byzantine_prevotes, byzantine_precommits, byzantine_proposals).flatten()
   }
+    
+    val byzantine_messages = {
+        // We can have at most 2^F faulty nodes, so we take the powerset of the byzantine messages
+        // to simulate all possible combinations of byzantine messages.
+        
+        // 10 dummy prevotes for future rounds
+        val dummy_prevotes = 1000.to(1025).map(r => {
+            PreVote({ src: "p4", round: r, id: None })
+        })
+        dummy_prevotes
+        //Set()
+    }
 
   
 
   // -------------------------------- actions --------------------------------
   action init = all {
-    nondet byz = byzantine_messages.powerset().oneOf()
+    //nondet byz = byzantine_messages.powerset().oneOf()
+    val byz = byzantine_messages
     s' = {
       system: NODES.mapBy(n => initialize_process(n)),
       message_buffer: NODES.mapBy(n => Set(initial_message)),//.union(byz)),

@@ -6,3 +6,10 @@
 # ignore all TLA+ specs and config files
 *.tla
 *.cfg
+
+#ignore any venvs
+**/venv/**
+**/.venv/**
+# ignore any ipython elements
+**/.ipynb_checkpoints/**
+**/.ipython/**

@@ -178,7 +178,9 @@ module tendermint {
         // Map the enabled proposals to effects and teh corresponding state updates
         val outputs = enabled_proposals.map(p => {
             state: { ...s, stage: PreVoteStage},
-            effects: effect_builder(p),
+            effects: effect_builder(p).union(
+                Set(Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round })))
+            )
             // TODO -> add logging effect to collect evidence
             }   
         )
@@ -220,7 +222,9 @@ module tendermint {
 
         val outputs = enabled_proposals.map(p => {
             state: { ...s, stage: PreVoteStage},
-            effects: effect_builder(p)
+            effects: effect_builder(p).union(
+                Set(Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
+            )
         }
         )
         outputs 
@@ -233,21 +237,17 @@ module tendermint {
         messages: Set[Message]
     ): Set[ListenerOutput] = {
         
-        val state_guard = and {
-            s.stage == PreVoteStage,
-        }
-
         // Do we have a quorum of PreVotes in the current round
         def message_guard = (pv) => (pv.round == s.round)
         val quorum = messages.get_pre_votes().filter(pv => and {
             message_guard(pv),
         }).size() >= 2 * F + 1 // quorum size is F + 1
 
-        if (quorum and state_guard) {
+        if (quorum) {
             // If we have a quorum, we can move to precommit stage
             val outputs = Set({
-                state: { ...s, stage: PreCommitStage},
-                effects: Set(Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
+                state: s,
+                effects: Set(Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round })))
             })
             outputs
         } else {
@@ -287,9 +287,6 @@ module tendermint {
         messages: Set[Message]
     ): Set[ListenerOutput] = {
         
-        val state_guard = and {
-            s.stage == PreCommitStage,
-        }
 
         // Do we have a quorum of PreCommits in the current round
         def message_guard = (pc) => (pc.round == s.round)
@@ -297,10 +294,12 @@ module tendermint {
             message_guard(pc),
         }).size() >= 2 * F + 1 // quorum size is F + 1
 
-        if (quorum and state_guard) {
+        if (quorum) {
             // If we have a quorum, we can move to decided stage
-            val outputs = Set(
-                start_round(s, s.round + 1)
+            val outputs = Set({
+                state: s,
+                effects: Set(Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
+            }
             )
             outputs
         } else {
@@ -338,7 +337,8 @@ module tendermint {
         def effect_builder = (p) => {
             if (s.stage == PreVoteStage) {
                 // If in prevote stage, broadcast precommit and move to precommit stage
-                Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) }))))
+                Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) }))),
+                    Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
             } else {
                 // If already in precommit stage, just update valid value
                 Set()
@@ -425,7 +425,7 @@ module tendermint {
         t: Set[TimeoutEvent]
     ): Set[ListenerOutput] = {
 
-        val candidates = t.filter(t => t.round == s.round and t.kind == ProposeTimeout)
+        val candidates = t.filter(t => t.round >= s.round and t.kind == ProposeTimeout)
         val guard = and {
             candidates.size() > 0,
             s.stage == ProposeStage,
@@ -447,7 +447,7 @@ module tendermint {
         s: LocalState,
         t: Set[TimeoutEvent]
     ): Set[ListenerOutput] = {
-        val candidates = t.filter(t => t.round == s.round and t.kind == PreVoteTimeout)
+        val candidates = t.filter(t => t.round >= s.round and t.kind == PreVoteTimeout)
         val guard = and {
             candidates.size() > 0,
             s.stage == PreVoteStage,
@@ -468,7 +468,7 @@ module tendermint {
         s: LocalState,
         t: Set[TimeoutEvent]
     ): Set[ListenerOutput] = {
-        val candidates = t.filter(t => t.round == s.round and t.kind == PreCommitTimeout)
+        val candidates = t.filter(t => t.round >= s.round and t.kind == PreCommitTimeout)
         val guard = and {
             candidates.size() > 0,
             s.stage == PreCommitStage,
@@ -493,7 +493,7 @@ module tendermint {
             upon_proposal_in_prevote_commit(s,messages),
             //upon_quorum_prevotes_any(s,messages), 
             upon_quorum_nil_prevotes(s,messages),
-            //upon_quorum_precommits_any(s,messages), //Actually it should be checked if we have a valid quorum or not. 
+            //upon_quorum_precommits_any(s,messages), 
             on_propose_timeout(s, timeouts),
             on_prevote_timeout(s, timeouts),
             on_precommit_timeout(s, timeouts)
@@ -527,7 +527,7 @@ module tendermint {
     }
 
     // Card(powset) = 4096
-    val byzantine_messages = {
+    val byzantine_messages_1 = {
         val rounds = Set(0) 
         val byzantine_proposals = rounds.map(r => {
         tuples(FAULTY, Set("v0","v1","v2"), rounds.setAdd(-1)).map(((f, v, vr)) => {
@@ -551,6 +551,18 @@ module tendermint {
         Set(byzantine_prevotes, byzantine_precommits, byzantine_proposals).flatten()
     }
 
+    val byzantine_messages = {
+        // We can have at most 2^F faulty nodes, so we take the powerset of the byzantine messages
+        // to simulate all possible combinations of byzantine messages.
+        
+        // 10 dummy prevotes for future rounds
+        val dummy_prevotes = 1000.to(1025).map(r => {
+            PreVote({ src: "p4", round: r, id: None })
+        })
+        dummy_prevotes
+        //Set()
+    }
+
     
     type GlobalState = {
         system: Node -> LocalState,
@@ -570,7 +582,7 @@ module tendermint {
 
     pure val TIMEOUT_ORDER = Map(ProposeTimeout -> 0, PreVoteTimeout -> 1, PreCommitTimeout -> 2)
     pure def should_replace(t1: TimeoutEvent, t2: TimeoutEvent): bool = {
-        TIMEOUT_ORDER.get(t2.kind) < TIMEOUT_ORDER.get(t1.kind) or t2.round > t1.round
+        TIMEOUT_ORDER.get(t2.kind) > TIMEOUT_ORDER.get(t1.kind) or t2.round > t1.round
     }
 
     pure def add_timeout(
@@ -622,7 +634,8 @@ module tendermint {
 
     var s : GlobalState
     action init = all {
-        nondet byz = byzantine_messages.powerset().oneOf()
+        //nondet byz = byzantine_messages.powerset().oneOf()
+        val byz = byzantine_messages
         s' = {
             system: NODES.mapBy(v => initialize_process(v)),
             internal_buffer: NODES.mapBy(v => Set()),
@@ -632,7 +645,7 @@ module tendermint {
     }
     
     action step = {
-        nondet process = oneOf(CORRECT.filter(v => s.message_buffer.get(v)!= Set()))
+        nondet process = oneOf(CORRECT.filter(v => s.message_buffer.get(v)!= Set() or s.internal_buffer.get(v) != Set()))
         val msgs = s.message_buffer.get(process)
         val timeouts = s.internal_buffer.get(process)
         val current_state = s.system.get(process)
@@ -713,12 +726,12 @@ module tendermint {
     
     val one_decided =
         not( 
-        s.system.values().forall(v => v.decision == None)
+            s.system.values().forall(v => v.decision == None)
         )
     
     val all_decided =
         not(
-        correct_nodes.exists(v => v.decision == None)
+            correct_nodes.exists(v => v.decision == None)
         )
     
     // Witness for a to find a case where a node is in the decided stage while another is prevote
@@ -732,7 +745,6 @@ module tendermint {
         }
         
 
-    val inv = s.system.values().forall(v => v.stage == DecidedStage implies v.decision != None)
             
     
     const F: int

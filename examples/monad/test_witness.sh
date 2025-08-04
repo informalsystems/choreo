@@ -7,10 +7,10 @@ runs=${1:-10}
 # The quint command
 cmd=(quint run monadbftFine.qnt \
      --main test \
-     --max-steps=1000 \
+     --max-steps=500 \
      --max-samples 1000 \
      --verbosity 2 \
-     --invariant no_timeouts \
+     --invariant missing_qc_w \
      --hide monadbft::csmi::s)
 
 times_ms=()       # to hold extracted times
