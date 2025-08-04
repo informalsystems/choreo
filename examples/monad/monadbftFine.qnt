@@ -1013,7 +1013,7 @@ module monadbft{
 
     pure val byz_messages = {
         val faulty = Set("v4")
-        val target_views = 1000.to(1020)
+        val target_views = 1000.to(1025)
         
         // Use fold to build a set directly
         target_views.fold(Set(), (acc1, v) => 

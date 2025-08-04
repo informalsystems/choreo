@@ -1164,9 +1164,10 @@ module monadbft{
     def missing_tip_w = not(missing_tip)
 
 
+    const B : int //Byz messages
     pure val byz_messages = {
         val faulty = Set("v4")
-        val target_views = 1000.to(1020)
+        val target_views = 1000.to(1000+B)
         
         // Use fold to build a set directly
         target_views.fold(Set(), (acc1, v) => 
@@ -1200,6 +1201,6 @@ module monadbft{
 }
 
 module test {
-  import monadbft(validators = Set("v1", "v2", "v3", "v4"), F = 1).*
-
+  val Byz : int = 25
+  import monadbft(validators = Set("v1", "v2", "v3", "v4"), F = 1, B = Byz).*
 }
