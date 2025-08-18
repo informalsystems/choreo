@@ -1,3 +1,5 @@
+// -*- mode: Bluespec; -*-
+
 module two_phase_commit {
   import basicSpells.* from "lib/basicSpells"
   import csmi(processes = NODES) as csmi from "lib/csmi"
