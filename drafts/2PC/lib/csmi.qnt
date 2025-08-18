@@ -1,296 +1,235 @@
 // -*- mode: Bluespec; -*-
 
-/**
- * Consensus State Machine Interface (CSMI)
- *
- * A library to handle common patterns in consensus specifications
- *
- * Gabriela Moreira, Josef Widder and Yassine Boukhari,
- * Informal Systems, 2025
- */
-module CSMIBase {
-  import basicSpells.* from "basicSpells"
+module csmi {
+    import basicSpells.* from "basicSpells"
 
-  type LocalState[process_id, message, other_fields] = {
-    process_id: process_id,
-    messages: Set[message]
-    | other_fields
-  }
 
-  type ConsensusResult[state, output] = {
-    output: Set[output],
-    state: state,
-  }
-  type UponResult[s, o] = Option[ConsensusResult[s, o]]
+    /// Given a type for identifying process and a record type to represent a state,
+    /// Create a record type with the `process_id` and remaining fields.
+    ///
+    /// Use it like:
+    /// ```
+    /// type ProcessID = int
+    /// type State = { field1: int, field2: str }
+    /// type LocalState = CSMI::LocalState[ProcessID, State]
+    /// ```
+    type LocalState[process_id, other_fields] = { process_id: process_id | other_fields}
 
-  type TimeoutEvent[fields] = fields
+    /// Given several type definitions, create a type to represent the environment of a consensus
+    /// state machine.
+    ///
+    /// 1. `p` is the type of the process identifier
+    /// 2. `s` is the type of the state
+    /// 3. `m` is the type of the messages
+    /// 4. `te` is the type of the internal events
+    /// 5. `l` is the type of the logging information
+    /// 6. `extensions` is a type that can be used to extend the environment
+    ///
+    /// Use it like:
+    /// ```
+    /// type ProcessID = int
+    /// type State = { field1: int, field2: str }
+    /// type Message =
+    ///   | Hello(int)
+    ///   | Bye(str)
+    /// type TimeoutEvent = int
+    /// type Logging = { foo: int, bar: str }
+    /// type EnvExtensions = { baz: bool }
+    /// type Environment = CSMI::Environment[ProcessID, State, Message, TimeoutEvent, Logging, EnvExtensions]
+    /// ```
+    type Environment[p, s, m, te, l, extensions] = {
+        system: p -> LocalState[p, s],
+        msgBuffer: p -> Set[m],
+        internalBuffer: p -> Set[te],
+        logging: l
+        | extensions
+    }
 
-  type Environment[p, s, m, te, b] = {
-    system: p -> LocalState[p, m, s],
-    activeTimeouts: p -> Option[TimeoutEvent[te]],
-    bookkeeping: b
-  }
+    /// Given a type for the Local State and a type for Effects (Effects are the
+    /// used by a process to change the state of the system, e.g sending a message, updating a mock variable, etc.),
+    /// create a type to represent a state machine transition.
+    /// The transition is a record type that contains:
+    /// 1. `effects` is a set of effects that the transition produces
+    /// 2. `postState` is the state that the transition leads to.
+    /// Use it like:
+    /// ```
+    /// type LocalState = CSMI::LocalState[ProcessID, State]
+    /// type Effect = SendMessage(Message) | UpdateVariable(str, int)
+    /// type Transition = CSMI::Transition[LocalState, Effect]
+    /// ```
+    ///
 
-  type ReceiveMessage[p, s, m, o] = (LocalState[p, m, s], m) => Set[UponResult[LocalState[p, m, s], o]]
+    type Transition[state, effect] = {
+        effects: Set[effect],
+        postState: state,
+    }
 
-  type ApplyEffect[p, s, m, te, o, b] =
-    (Environment[p, s, m, te, b], p, Set[o]) => Environment[p, s, m, te, b]
-  type FireTimeoutEvent[p, s, m, te, o] = (LocalState[p, m, s], TimeoutEvent[te]) => ConsensusResult[LocalState[p, m, s], o]
+    /// Given a type for a single transition, create a type to represent a set of transitions.
+    type Transitions[tr] = Set[tr]
 
-  pure def bookkeep(env: Environment[p, s, m, te, b], f: b => b): Environment[p, s, m, te, b] = {
-    { ...env, bookkeeping: f(env.bookkeeping) }
-  }
-
-  pure def broadcast(env: Environment[p, s, m, te, b], msg: m): Environment[p, s, m, te, b] = {
-    { ...env, system: env.system.transformValues(s => { ...s, messages: s.messages.setAdd(msg) }) }
-  }
-
-  pure def timeout(
-    env: Environment[p, s, m, te, b],
-    v: p,
-    timeout: TimeoutEvent[te],
-    should_replace: (TimeoutEvent[te], TimeoutEvent[te]) => bool
-  ): Environment[p, s, m, te, b] = {
-    { ...env,
-      activeTimeouts: env.activeTimeouts.setBy(v, old_timeout => Some({
-        match old_timeout {
-          | None => timeout
-          | Some(ts) => if (should_replace(ts, timeout)) timeout else ts
+    /// Given several type definitions, create a type to represent the local context of a process.
+    /// The local context represents a process's view of the system. It may include: the set of received messages, the set of internal events, and any other extensions that are needed.
+    /// the set of internal events, and any other extensions that are needed.
+    /// Local Contexts are used as input to the event listeners and message handlers.
+    /// Use it like:
+    /// ```
+    /// type LocalContext = CSMI::LocalContext[Message, InternalEvent, SomeExtension]
+    type LocalContext[m, te, extensions] = {
+        msgBuffer: Set[m],
+        internalBuffer: Set[te]
+        | extensions
         }
-      }))
+
+    /// A context builder is a function that takes  an environment and a process identifier,
+    /// and returns a local context for that process.
+    /// After type instantiation, it should have the following signature:
+    /// ```
+    /// (Environment, ProcessID) => LocalContext
+    /// ```
+    type ContextBuilder[p, s, m, te, l, other] = (Environment[p, s, m, te, l, other],p) => LocalContext[m, te, other]
+
+    /// A listener is a function that takes a local state and a local context, and returns a set of transitions.
+    /// After type instantiation, it should have the following signature:
+    /// ```
+    /// (LocalState, LocalContext) => Transitions
+    /// ```
+    type Listener[p, s, m, te, l, other] = (LocalState[p, s], LocalContext[m, te, other]) => Transitions
+
+    /// An effect processor is a function that takes an environment, a process identifier, and a transition,
+    /// and returns a new environment after applying the effects of the transition.
+    /// After type instantiation, it should have the following signature:
+    /// ```
+    /// (Environment, ProcessID, Transition) => Environment
+    /// ```
+    type EffectProcessor[p, s, m, te, l, other] = (Environment[p, s, m, te, l, other], p, Transition) => Environment[p, s, m, te, l, other]
+
+    /// A displayer is a function that takes an environment and returns a displayable representation of the environment.
+    /// This is used to visualize the state of the system for debugging or monitoring purposes.
+    /// After type instantiation, it should have the following signature:
+    /// ```
+    /// (Environment) => Display
+    /// ```
+    /// The display type can be anything.
+    type Displayer[p,s,m, te, l, extensions, d] = (Environment[p, s, m, te, l, extensions]) => d
+
+
+
+    const processes: Set[p]
+    /// A single variable to store the whole state
+    var s: Environment[p, s, m, te, l, extensions]
+    var display: d
+    var byzNetworkMsgs: Set[m]
+
+
+    // Symmetry Reduction Interface
+    // TODO: expose the symmetry reduction interface
+
+
+
+    //
+    //
+    // State Machine Actions
+    //
+    //
+
+    /// Initialize the state machine with a set of processes, an initial environment, and a set of byzantine messages.
+    /// The `initialize_processes` function is used to initialize the local state of each process
+    /// The `initial_msgBuffer` function is used to initialize the message buffer of each process
+    /// The `initial_internalBuffer` function is used to initialize the internal buffer of each process
+    /// The `env` parameter is the initial environment of the system and will be used as a starting point
+    /// for initializing the whole system.
+    /// The `byzNetworkMsgs` parameter is a set of byzantine messages that will be injected into the message buffer of the system.
+    /// Use it like:
+    /// ```
+    /// pure def initialize_processes(p: ProcessID): LocalState[ProcessID, State] = { process_id: p, field1: 0, field2: "" }
+    /// pure def initial_msgBuffer(p: ProcessID): Set[Message] = Set()
+    /// pure def initial_internalBuffer(p: ProcessID): Set[TimeoutEvent] = Set(Timeout(1))
+    /// pure val init_env = { system: Map(), msgBuffer: Map(), internalBuffer: Map(), logging: { foo: 0, bar: "" } | { baz: true } }
+    /// pure val byz_msgs = Set(Hello(1), Bye("test"))
+    /// action init = csmi::init(
+    ///     initialize_processes,
+    ///     initial_msgBuffer,
+    ///     initial_internalBuffer,
+    ///     init_env,
+    ///     byz_msgs
+    /// )
+    /// ```
+    action init(
+        initialize_processes: (p) => LocalState[p, s],
+        initial_msgBuffer: (p) => Set[m],
+        initial_internalBuffer: (p) => Set[te],
+        env : Environment[p, s, m, te, l, extensions],
+        displayer : Displayer[p, s, m, te, l, extensions, d],
+    ):bool = {
+        val e = { ... env,
+            system: processes.mapBy(initialize_processes),
+            msgBuffer: processes.mapBy(initial_msgBuffer),
+            internalBuffer: processes.mapBy(initial_internalBuffer),
+        }
+        all {
+          s' = e,
+          // display' = displayer(e),
+        }
     }
-  }
 
-  pure def update_state(
-    env: Environment[p, s, m, te, b],
-    v: p,
-    res: ConsensusResult[LocalState[p, m, s], o],
-    apply_effect: ApplyEffect[p, s, m, te, o, b]
-  ): Environment[p, s, m, te, b] = {
-    val new = { ... env, system: env.system.set(v, res.state) }
-    apply_effect(new, v, res.output)
-  }
-
-  pure def and_then(
-    res: ConsensusResult[LocalState[p, m, s], o],
-    f: (LocalState[p, m, s]) => ConsensusResult[LocalState[p, m, s], o]
-  ): ConsensusResult[LocalState[p, m, s], o] = {
-    pure val new_res = f(res.state)
-    join_results(res, new_res)
-  }
-
-  pure def and_then_state(
-    state: LocalState[p, m, s],
-    f: (LocalState[p, m, s]) => r
-  ): r = {
-    f(state)
-  }
-
-  pure def join_results(
-    res1: ConsensusResult[LocalState[p, m, s], o],
-    res2: ConsensusResult[LocalState[p, m, s], o]
-  ): ConsensusResult[LocalState[p, m, s], o] = {
-    { state: res2.state, output: res1.output.union(res2.output) }
-  }
-
-  pure def no_output(s: LocalState[p, m, s]): ConsensusResult[LocalState[p, m, s], o] = {
-    { state: s, output: Set() }
-  }
-
-  pure def upon(condition: bool, transition: (bool) => ConsensusResult): UponResult = {
-    if (condition)
-      Some(transition(true))
-    else
-      None
-  }
-}
-
-module CSMIState {
-  import basicSpells.* from "basicSpells"
-  import CSMIBase.*
-
-  // FIXME: I think this will not work with Apalache. However, I can't test this as this is resulting in a
-  // huge spec once we resolve type aliases as the types are too complex. This exceeds the gRPC limit which
-  // is already quite high.
-  // My alternative approach (sending processes as a param in init and step) is not working due to some
-  // weird effect error on step.
-  const processes: Set[p]
-  var s: Environment
-
-  // This specification is event triggered, so a process step can only be triggered by a message or a timeout
-  // as a result we need either messages or timeouts in the initial state
-  action init(
-    initialize_process: (p) => LocalState[p, m, s],
-    initial_bookkeeping: b
-  ): bool = all {
-    s' = {
-      system: processes.mapBy(v => initialize_process(v)),
-      activeTimeouts: processes.mapBy(v => None),
-      bookkeeping: initial_bookkeeping,
+    /// Initialize the state machine with an environment and a set of byzantine messages.
+    /// the `env` parameter is the initial environment of the system.
+    /// The `byzNetworkMsgs` parameter is a set of byzantine messages that will be injected into the message buffer of the system.
+    /// Use it like:
+    /// ```
+    /// pure val init_env = { system: Map(), msgBuffer: Map(), internalBuffer: Map(), logging: { foo: 0, bar: "" } | { baz: true } }
+    /// pure val byz_msgs = Set(Hello(1), Bye("test"))
+    /// action init = csmi::init_basic(init_env, byz_msgs)
+    /// ```
+    action init_basic(
+        env: Environment[p, s, m, te, l, extensions],
+        byzNetworkMsgs: Set[m],
+    )
+    : bool = all {
+        s' = env,
+        byzNetworkMsgs' = byzNetworkMsgs,
+        processes.size() > 0, // we have at least one process
     }
-  }
 
-  //
-  // Standard interleaving semantics (one process receives one message/timeout in one action)
-  //
 
-  action receive_one_message(
-    env: Environment[p, s, m, te, b],
-    v: p,
-    msg: m,
-    receive_message: ReceiveMessage[p, s, m, o],
-    apply_effect: ApplyEffect[p, s, m, te, o, b],
-  ): bool = {
-    nondet res = env.system.get(v).receive_message(msg).oneOf()
-    all {
-      // Pre-condition: only make a transition if the condition held true
-      // (that is, the "upon" condition - as `upon` will return None if the
-      // condition does not hold).
-      res != None,
-      s' = update_state(env, v, res.unwrap(), apply_effect)
+    /// Given a set of pure functions, apply a single step of the state machine.
+    /// The `listener` function listens to the local state and the local context of a process, and returns a set of transitions.
+    /// The `apply_effect` function applies the effects of a transition to the environment and returns the new environment.
+    /// The `context` function builds a local context for a process given the environment and the process identifier.
+    /// The `displayer` function displays the current state of the system.
+    /// The `more_byzantines` parameter is a set of byzantine messages that will be injected into the message buffer of the system.
+    /// Use it like:
+    /// ```
+    /// action step = csmi::step(
+    ///     listener,
+    ///     apply_effect,
+    ///     context,
+    ///     displayer,
+    ///     more_byzantines
+    /// )
+    /// ```
+    action step (
+        listener: Listener[p, s, m, te, l, extensions],
+        apply_effect: EffectProcessor[p, s, m, te, l, extensions],
+        context: ContextBuilder[p, s, m, te, l, extensions],
+        displayer : Displayer[p, s, m, te, l, extensions, d],
+        more_byzantines: Set[m]
+    ):bool = all {
+        any {
+            nondet v = oneOf(processes)
+            val input = context(s, v)
+            val ls = s.system.get(v)
+            val transitions = listener(ls, input)
+            all {
+                transitions.size() > 0, // we have a transition to apply
+                nondet transition = oneOf(transitions)
+                val post_env = apply_effect(s, v, transition)
+                all{
+                    s' = post_env,
+                    // display' = displayer(post_env)
+                    }
+            },
+        }
     }
-  }
 
-  pure def fire_one_timeout_event(
-    env: Environment[p, s, m, te, b],
-    v: p,
-    timeout: TimeoutEvent[te],
-    fire_timeout_event: FireTimeoutEvent[p, s, m, te, o],
-    apply_effect: ApplyEffect[p, s, m, te, o, b]
-  ): Environment[p, s, m, te, b] = {
-    val consumed_timeout_env = {
-      ...env,
-      activeTimeouts: env.activeTimeouts.set(v, None)
-    }
-    val res = consumed_timeout_env.system.get(v).fire_timeout_event(timeout)
-    update_state(consumed_timeout_env, v, res, apply_effect)
-  }
-
-  action receive_msg(
-    v: p,
-    msg: m,
-    receive_message: ReceiveMessage[p, s, m, o],
-    apply_effect: ApplyEffect[p, s, m, te, o, b]
-  ): bool = all {
-    s.system.get(v).messages.contains(msg),
-    receive_one_message(s, v, msg, receive_message, apply_effect)
-  }
-
-  action receive_some_msg(
-    v: p,
-    receive_message: ReceiveMessage[p, s, m, o],
-    apply_effect: ApplyEffect[p, s, m, te, o, b]
-  ): bool = all {
-    // s.msgBuffer.get(v) != Set(),
-    nondet msg = oneOf(s.system.get(v).messages)
-    receive_msg(v, msg, receive_message, apply_effect)
-  }
-
-  action fire_timeout(
-    v: p,
-    fire_timeout_event: FireTimeoutEvent[p, s, m, te, o],
-    apply_effect: ApplyEffect[p, s, m, te, o, b]
-  ): bool = {
-     val timeout = s.activeTimeouts.get(v)
-     all {
-       timeout != None,
-       s' = fire_one_timeout_event(s, v, timeout.unwrap(), fire_timeout_event, apply_effect),
-     }
-  }
-
-  action step(
-    receive_message: ReceiveMessage[p, s, m, o],
-    fire_timeout_event: FireTimeoutEvent[p, s, m, te, o],
-    apply_effect: ApplyEffect[p, s, m, te, o, b],
-    byzantine_messages: Set[m],
-    timeout_chance: int // between 0 and 100
-  ): bool = any {
-    all {
-      nondet timeout_frequency_control = 1.to(100).oneOf()
-      or {
-        // s.msgBuffer.values().flatten() == Set(),
-        timeout_frequency_control <= timeout_chance,
-      },
-      s.activeTimeouts.values().exists(t => t != None),
-      // pick a process that has an active timeout
-      nondet v = oneOf(processes.filter(v => s.activeTimeouts.get(v) != None))
-      fire_timeout(v, fire_timeout_event, apply_effect)
-    },
-    all {
-      // s.msgBuffer.values().flatten() != Set(),
-      // pick a process that has a message available in its buffer
-      nondet v = oneOf(processes.filter(v => s.system.get(v).messages != Set()))
-      receive_some_msg(v, receive_message, apply_effect)
-    },
-    all {
-      // byzantine_messages != Set(),
-      nondet msg = oneOf(byzantine_messages)
-      // Workaround weird effect bug if we don't use `s` here
-      nondet v = oneOf(processes.filter(v => s.system.keys() != Set()))
-      receive_one_message(s, v, msg, receive_message, apply_effect)
-    },
-  }
-
-  action step_no_timeout(
-    receive_message: ReceiveMessage[p, s, m, o],
-    apply_effect: ApplyEffect[p, s, m, te, o, b]
-  ): bool = all {
-    // s.msgBuffer.values().flatten() != Set(),
-    // pick a process that has a message available in its buffer
-    nondet v = oneOf(processes.filter(v => s.system.get(v).messages != Set()))
-    receive_some_msg(v, receive_message, apply_effect)
-  }
-
-  //
-  // Accelerated semantics (multiple process may receive multiple messages/timeouts in one action)
-  //
-
-  // action receive_msg_accelerated(
-  //   receive_message: ReceiveMessage[p, s, m, o],
-  //   apply_effect: ApplyEffect[p, s, m, te, o, b]
-  // ): bool = all {
-  //   nondet msgs = processes.map(v =>
-  //     s.msgBuffer.get(v).powerset().exclude(Set(Set())).map(m => (v, m))
-  //   ).flatten().powerset().oneOf()
-  //   val deliver = msgs.setToMap()
-  //   s' = deliver.keys().fold(s, (s, v) =>
-  //     deliver.get(v).fold(
-  //       s,
-  //       (s2, msg) => receive_one_message(s, v, msg, receive_message, apply_effect))
-  //   )
-  // }
-
-  // action receive_timeout_accelerated(
-  //   fire_timeout_event: FireTimeoutEvent[p, s, te, o],
-  //   apply_effect: ApplyEffect[p, s, m, te, o, b]
-  // ): bool = all {
-  //    nondet processes_to_timeout = processes.filter(v => s.activeTimeouts.get(v) != None)
-  //      .powerset().exclude(Set()).oneOf()
-  //    s' = processes_to_timeout.fold(s, (s, v) => {
-  //      val timeout = s.activeTimeouts.get(v)
-  //      fire_one_timeout_event(s, v, timeout.unwrap(), fire_timeout_event, apply_effect)
-  //    })
-  // }
-
-  // action step_accelerated(
-  //   receive_message: ReceiveMessage[p, s, m, o],
-  //   fire_timeout_event: FireTimeoutEvent[p, s, te, o],
-  //   apply_effect: ApplyEffect[p, s, m, te, o, b],
-  //   timeout_chance: int // between 0 and 100
-  // ): bool = any {
-  //   all {
-  //     nondet timeout_frequency_control = 1.to(100).oneOf()
-  //     timeout_frequency_control <= timeout_chance,
-  //     s.activeTimeouts.values().exists(t => t != None),
-  //     // pick a process that has an active timeout
-  //     nondet v = oneOf(processes.filter(v => s.activeTimeouts.get(v) != None))
-  //     fire_timeout(v, fire_timeout_event, apply_effect)
-  //   },
-  //   all {
-  //     s.msgBuffer.values().flatten() != Set(),
-  //     // pick a process that has a message available in its buffer
-  //     nondet v = oneOf(processes.filter(v => s.msgBuffer.get(v) != Set()))
-  //     receive_some_msg(v, receive_message, apply_effect)
-  //   }
-  // }
 }

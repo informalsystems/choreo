@@ -1,184 +1,194 @@
 module two_phase_commit {
   import basicSpells.* from "lib/basicSpells"
+  import csmi(processes = NODES) as csmi from "lib/csmi"
 
   // --- Types ----------------------------------------------------------------
-  type TransactionId = int
-  type Value = str
   type Node = str
   type Role = Coordinator | Participant
 
-  type Stage =
-    | InitStage           // before any messages
-    | PrepareStage        // coordinator has sent Prepare
-    | WaitPrepareStage    // participant waiting for Prepare
-    | VoteStage           // participant has sent Vote
-    | WaitVoteStage       // coordinator waiting for Votes
-    | CommitStage         // coordinator sent Commit or Abort
-    | DecidedStage        // participant has received decision
+  type Stage = Working | Prepared | Committed | Aborted
 
   // Messages exchanged in 2PC
-  type PrepareMsg = { src: Node, tx: TransactionId }
-  type VoteMsg    = { src: Node, tx: TransactionId, vote: bool }
-  type DecisionMsg= { src: Node, tx: TransactionId, commit: bool }
+  type PrepareMsg = Node
 
   type Message =
-    | Prepare(PrepareMsg)
-    | Vote(VoteMsg)
-    | Decision(DecisionMsg)
-
-  // Effects: broadcast, start timeouts, logging
-  type ExternalEffect = Broadcast(Message)
-  type InternalEffect = StartTimeout({ tx: TransactionId, stage: Stage })
-  type LoggingEffect  = CollectEvidence(Message)
+    | CoordinatorAbort
+    | CoordinatorCommit
+    | ParticipantPrepared(Node)
 
   type Effect =
-    | Ext(ExternalEffect)
-    | Inter(InternalEffect)
-    | Log(LoggingEffect)
+    | Broadcast(Message)
 
-  type LocalState = {
-    process_id: Node,
+  type LocalState = csmi::LocalState[Node, {
     role: Role,
-    tx: TransactionId,
-    value: Option[Value],    // only coordinator holds proposed value
     stage: Stage,
-    message_buffer: Set[Message],
-    votes: Node -> bool,  // collected votes
-    decision: Option[bool],  // true=commit, false=abort
-  }
+  }]
 
-  type ListenerOutput = { effects: Set[Effect], state: LocalState }
+  type LocalContext = csmi::LocalContext[Message, (), ()]
+  type Transition = csmi::Transition[LocalState, Effect]
 
-  pure def get_proposals
-  pure def get_votes(msgs: Set[Message]): Set[VoteMsg] =
-    msgs.filterMap(m => match m { | Vote(v) => Some(v) | _ => None })
+  type Environment = csmi::Environment[
+    Node,
+    LocalState,
+    Message,
+    (),
+    (),
+    ()
+  ]
 
-  // --- Participant: on Prepare ----------------------------------------------
-  pure def on_wait_prepare(
-    s: LocalState,
-    msgs: Set[Message]
-  ): Set[ListenerOutput] = {
-    val state_guard = s.stage == WaitPrepareStage
-    // filter Prepare for our tx
-    val preps = msgs.filterMap(m => match m {
-      | Prepare(p) if p.tx == s.tx => Some(p)
+  pure def get_prepared_msgs(msgs: Set[Message]): Set[Node] = {
+    msgs.filterMap(m => match m {
+      | ParticipantPrepared(n) => Some(n)
       | _ => None
     })
-    if state_guard and preps.size() == 1 {
-      val p = preps.head
-      // decide locally whether to commit; user-defined canCommit
-      val can_commit = TRUE  // replace with application check
-      val vote_msg = Vote({ src: s.process_id, tx: s.tx, vote: can_commit })
-      val new_stage = VoteStage
-      val effs = Set(
-        Log(CollectEvidence(Prepare(p))),
-        Ext(Broadcast(vote_msg))
-      )
-      Set({ effects: effs, state: { ...s, stage: new_stage } })
-    } else {
+  }
+
+  // --- Participant transitions ----------------------------------------------
+  pure def spontaneously_prepares(s: LocalState, msgs: Set[Message]): Set[Transition] = {
+    if (not(s.role == Participant and s.stage == Working)) {
       Set()
-    }
-  }
-
-  // --- Coordinator: on Init -> send Prepare ------------------------------
-  pure def on_init_coordinator(
-    s: LocalState,
-    _: Set[Message]
-  ): Set[ListenerOutput] = {
-    if s.role == "Coordinator" and s.stage == InitStage {
-      val prep = Prepare({ src: s.process_id, tx: s.tx })
-      val effs = Set(
-        Log(CollectEvidence(prep)),
-        Ext(Broadcast(prep)),
-        Inter(StartTimeout({ tx: s.tx, stage: WaitVoteStage }))
-      )
-      Set({ effects: effs, state: { ...s, stage: WaitVoteStage } })
     } else {
-      Set()
-    }
-  }
-
-  // --- Coordinator: on Votes quorum -----------------------------------------
-  pure def on_wait_votes(
-    s: LocalState,
-    msgs: Set[Message]
-  ): Set[ListenerOutput] = {
-    val state_guard = s.stage == WaitVoteStage
-    if not(state_guard) then Set() else {
-      val votes = get_votes(msgs)
-      val by_nodes = votes.map(v => v.src).set()
-      // assume participants = ALL minus coordinator
-      val expected = NODES.remove(s.process_id)
-      if by_nodes.size() >= expected.size() {
-        // quorum received from all participants
-        // abort if any vote==false
-        val commit_decision = votes.forall(v => v.vote)
-        val decision_msg = Decision({ src: s.process_id, tx: s.tx, commit: commit_decision })
-        val effs = Set(
-          Log(CollectEvidence(decision_msg)),
-          Ext(Broadcast(decision_msg))
-        )
-        val new_stage = CommitStage
-        Set({ effects: effs, state: { ...s, stage: new_stage, decision: Some(commit_decision) } })
-      } else {
-        Set()
-      }
-    }
-  }
-
-  // --- Participant: on Decision ---------------------------------------------
-  pure def on_receive_decision(
-    s: LocalState,
-    msgs: Set[Message]
-  ): Set[ListenerOutput] = {
-    val state_guard = s.stage == VoteStage
-    if not(state_guard) then Set() else {
-      val decs = msgs.filterMap(m => match m {
-        | Decision(d) if d.tx == s.tx => Some(d)
-        | _ => None
+      Set({
+        effects: Set(Broadcast(ParticipantPrepared(s.process_id))),
+        postState: { ...s, stage: Prepared }
       })
-      if decs.size() == 1 {
-        val d = decs.head
-        // apply or rollback based on d.commit (true=commit)
-        // user can hook application logic here
-        val new_stage = DecidedStage
-        val effs = Set(Log(CollectEvidence(Decision(d))))
-        Set({ effects: effs, state: { ...s, stage: new_stage, decision: Some(d.commit) } })
-      } else {
-        Set()
-      }
     }
   }
 
-  // --- Main Listener --------------------------------------------------------
+  pure def spontaneously_aborts(s: LocalState, msgs: Set[Message]): Set[Transition] = {
+    if (not(s.role == Participant and s.stage == Working)) {
+      Set()
+    } else {
+      Set({
+        effects: Set(),
+        postState: { ...s, stage: Aborted }
+      })
+    }
+  }
+
+  pure def aborts_as_instructed(s: LocalState, msgs: Set[Message]): Set[Transition] = {
+    if (not(s.role == Participant and msgs.contains(CoordinatorAbort))) {
+      Set()
+    } else {
+      Set({
+        effects: Set(),
+        postState: { ...s, stage: Aborted }
+      })
+    }
+  }
+
+  pure def commits_as_instructed(s: LocalState, msgs: Set[Message]): Set[Transition] = {
+    if (not(s.role == Participant and msgs.contains(CoordinatorCommit))) {
+      Set()
+    } else {
+      Set({
+        effects: Set(),
+        postState: { ...s, stage: Committed }
+      })
+    }
+  }
+
+  // --- Coordinator transitions ------------------------------
+  pure def decides_on_commit(
+    s: LocalState,
+    msgs: Set[Message]
+  ): Set[Transition] = {
+    if (not(s.role == Coordinator and s.stage == Working and msgs.get_prepared_msgs().size() == PARTICIPANTS.size())) {
+      Set()
+    } else {
+      Set({
+        effects: Set(Broadcast(CoordinatorCommit)),
+        postState: { ...s, stage: Committed }
+      })
+    }
+  }
+
+  pure def decides_on_abort(
+    s: LocalState,
+    msgs: Set[Message]
+  ): Set[Transition] = {
+    if (not(s.role == Coordinator and s.stage == Working)) {
+      Set()
+    } else {
+      Set({
+        effects: Set(Broadcast(CoordinatorAbort)),
+        postState: { ...s, stage: Aborted }
+      })
+    }
+  }
+
+   // --- Main Listener --------------------------------------------------------
   pure def main_listener(
     s: LocalState,
-    msgs: Set[Message]
-  ): Set[ListenerOutput] = {
+    c: LocalContext
+  ): Set[Transition] = {
     Set(
-      on_init_coordinator(s, msgs),
-      on_wait_prepare(s, msgs),
-      on_wait_votes(s, msgs),
-      on_receive_decision(s, msgs)
-    ).flatten().filter(o => o.effects.size() > 0 or o.state != s)
+     spontaneously_prepares(s, c.msgBuffer),
+     spontaneously_aborts(s, c.msgBuffer),
+     aborts_as_instructed(s, c.msgBuffer),
+     commits_as_instructed(s, c.msgBuffer),
+     decides_on_commit(s, c.msgBuffer),
+     decides_on_abort(s, c.msgBuffer)
+    ).flatten().filter(o => o.effects.size() > 0 or o.postState != s)
   }
 
-  // --- Initialization ------------------------------------------------------
+  pure def apply_effect(env: Environment, v: Node, tr: Transition): Environment = {
+    val env1 = { ...env, system: env.system.setBy(v, s => tr.postState) }
+    tr.effects.fold(env1, (e, x) => {
+      match x {
+        | Broadcast(m) => {
+          { ...e, msgBuffer: e.msgBuffer.transformValues(b => b.setAdd(m)) }
+        }
+      }
+    })
+  }
+
   val COORDINATOR: Node = "c"
-  val PARTICIPANTS: Set[Node] = Set("p1", "p2")
+  val PARTICIPANTS: Set[Node] = Set("p1", "p2", "p3")
   pure val NODES = PARTICIPANTS.union(Set(COORDINATOR))
 
-  def initialize(n: Node, tx: TransactionId, value: Option[Value]): LocalState = {
-    let role = if n == COORDINATOR then "Coordinator" else "Participant"
+  def initialize(n: Node): LocalState = {
+    val role = if (n == COORDINATOR) Coordinator else Participant
     {
       process_id: n,
       role: role,
-      tx: tx,
-      value: value,
-      stage: InitStage,
-      message_buffer: Set(),
-      votes: Map(),
-      decision: None,
+      stage: Working,
     }
   }
+
+  action init = csmi::init(
+    initialize,
+    (_) => Set(), // no initial/byzantine messages
+    (_) => Set(), // no timeouts
+    {
+      system: Map(),
+      msgBuffer: Map(),
+      internalBuffer: Map(),
+      logging: (),
+    },
+    (d) => d,
+  )
+
+  pure def env_to_local_context(env: Environment, process_id: Node): LocalContext =
+    {
+      msgBuffer: env.msgBuffer.getOrElse(process_id, Set()),
+      internalBuffer: env.internalBuffer.getOrElse(process_id, Set()),
+    }
+
+  action step = csmi::step(
+    main_listener,
+    apply_effect,
+    env_to_local_context, // env to local context,
+    (d) => d, // displayer
+    Set() // more byzantines
+  )
+
+  val consistency = PARTICIPANTS.forall(p1 => {
+    PARTICIPANTS.forall(p2 => {
+      not(csmi::s.system.get(p1).stage == Committed
+        and csmi::s.system.get(p2).stage == Aborted)
+    })
+  })
+
+  val wit_commit = PARTICIPANTS.exists(p => csmi::s.system.get(p).stage != Committed)
 }
