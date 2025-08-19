@@ -10,30 +10,24 @@ module two_phase_commit {
 
   type Stage = Working | Prepared | Committed | Aborted
 
-  // Messages exchanged in 2PC
-  type PrepareMsg = Node
-
   type Message =
     | CoordinatorAbort
     | CoordinatorCommit
     | ParticipantPrepared(Node)
-
-  type Effect =
-    | Broadcast(Message)
 
   type StateFields = {
     role: Role,
     stage: Stage,
   }
 
+  type CustomEffects = ()
   type Event = ()
   type Extensions = ()
-
 
   /* Boilerplate */
   type LocalState = glyph::LocalState[Node, StateFields]
   type LocalContext = glyph::LocalContext[Message, Event, Extensions]
-  type Transition = glyph::Transition[LocalState, Effect]
+  type Transition = glyph::Transition[Node, StateFields, Message, CustomEffects]
   type GlobalContext = glyph::GlobalContext[
     Node,
     StateFields,
@@ -56,7 +50,7 @@ module two_phase_commit {
       Set()
     } else {
       Set({
-        effects: Set(Broadcast(ParticipantPrepared(s.process_id))),
+        effects: Set(glyph::Broadcast(ParticipantPrepared(s.process_id))),
         post_state: { ...s, stage: Prepared }
       })
     }
@@ -104,7 +98,7 @@ module two_phase_commit {
       Set()
     } else {
       Set({
-        effects: Set(Broadcast(CoordinatorCommit)),
+        effects: Set(glyph::Broadcast(CoordinatorCommit)),
         post_state: { ...s, stage: Committed }
       })
     }
@@ -118,7 +112,7 @@ module two_phase_commit {
       Set()
     } else {
       Set({
-        effects: Set(Broadcast(CoordinatorAbort)),
+        effects: Set(glyph::Broadcast(CoordinatorAbort)),
         post_state: { ...s, stage: Aborted }
       })
     }
@@ -136,17 +130,6 @@ module two_phase_commit {
       decides_on_commit(s, c.messages),
       decides_on_abort(s, c.messages)
     ).flatten()
-  }
-
-  pure def apply_effect(env: GlobalContext, v: Node, tr: Transition): GlobalContext = {
-    val env1 = { ...env, system: env.system.setBy(v, s => tr.post_state) }
-    tr.effects.fold(env1, (e, x) => {
-      match x {
-        | Broadcast(m) => {
-          { ...e, messages: e.messages.transformValues(b => b.setAdd(m)) }
-        }
-      }
-    })
   }
 
   val COORDINATOR: Node = "c"
@@ -171,7 +154,7 @@ module two_phase_commit {
 
   action step = glyph::step(
     main_listener,
-    apply_effect,
+    (c, _) => c,
     (e, p) => e, // env to local context,
     Set() // more byzantines
   )

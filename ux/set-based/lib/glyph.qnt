@@ -16,9 +16,9 @@ module glyph {
     | ext
   }
 
-  type Transition[state, effect] = {
-    post_state: state,
-    effects: Set[effect],
+  type Transition[p, s, m, ce] = {
+    post_state: LocalState[p, s],
+    effects: Set[Effect[p, m, ce]],
   }
 
   type GlobalContext[p, s, m, e, ext] = {
@@ -35,32 +35,41 @@ module glyph {
   }
 
   // This is the message routing to the # handler
-  type Listener[p, s, m, e, ef, ext] =
-    (LocalState[p, s], LocalContext[m, e, ext]) => Set[Transition[LocalState[p, s], ef]]
+  type Listener[p, s, m, e, ce, ext] =
+    (LocalState[p, s], LocalContext[m, e, ext]) => Set[Transition[p, s, m, ce]]
 
-  type EffectProcessor[p, s, m, e, ef, ext] =
-    (GlobalContext[p, s, m, e, ext], p, Transition[LocalState[p, s], ef]) => GlobalContext[p, s, m, e, ext]
+  type EffectProcessor[p, s, m, e, ce, ext] =
+    (GlobalContext[p, s, m, e, ext], ce) => GlobalContext[p, s, m, e, ext]
 
   type ExtensionsConverter[p, l, g] =
     (g, p) => l
 
-  pure def broadcast(
-    env: GlobalContext[p, s, m, e, ext],
-    msg: m
-  ): GlobalContext[p, s, m, e, ext] = {
-    { ...env,
-      messages: env.messages.transformValues(s => s.setAdd(msg))
-    }
-  }
+  type Effect[p, m, ce] =
+    | Broadcast(m)
+    | Send({ to: p, message: m })
+    | CustomEffect(ce)
 
-  pure def send(
+  pure def apply_effect(
     env: GlobalContext[p, s, m, e, ext],
     v: p,
-    msg: m
+    tr: Transition[p, s, m, ce],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, ext]
   ): GlobalContext[p, s, m, e, ext] = {
-    { ...env,
-      messages: env.messages.setBy(v, s => s.setAdd(msg))
-    }
+    val env1 = { ...env, system: env.system.setBy(v, s => tr.post_state) }
+
+    tr.effects.fold(env1, (e, effect) => {
+      match effect {
+        | Broadcast(m) => {
+          { ...e, messages: e.messages.transformValues(b => b.setAdd(m)) }
+        }
+        | Send(r) => {
+          { ...e, messages: e.messages.setBy(r.to, b => b.setAdd(r.message)) }
+        }
+        | CustomEffect(ex) => {
+          apply_custom_effect(e, ex)
+        }
+      }
+    })
   }
 
   const processes: Set[p]
@@ -93,7 +102,7 @@ module glyph {
 
   action step(
     listener: Listener[p, s, m, e, l, extensions],
-    apply_effect: EffectProcessor[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
     // displayer: Displayer[p, s, m, te, l, extensions, d],
     more_byzantines: Set[m]
@@ -105,7 +114,7 @@ module glyph {
     all {
       transitions.size() > 0,
       nondet transition = oneOf(transitions)
-      val post_env = apply_effect(s, v, transition)
+      val post_env = apply_effect(s, v, transition, apply_custom_effect)
       all {
         s' = post_env,
         // display' = displayer(post_env)
