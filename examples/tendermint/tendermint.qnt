@@ -120,6 +120,8 @@ module tendermint {
     pure def id(v: Value): ValueId = { hashed: v }
 // ------------------------------------------------------
 
+    // TODO: Update start_round function to work with glyph library  
+    /*
     pure def start_round(
         s: LocalState,
         round: Round
@@ -153,11 +155,13 @@ module tendermint {
             effects: output,
             state: s1
         }
+    */
 
     pure def upon_proposal_in_propose(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
+        input: LocalContext
+    ): Set[Transition] = {
+        val s = input.state
+        val messages = input.messages
 
         val state_guard = and {
             s.stage == ProposeStage
@@ -169,7 +173,6 @@ module tendermint {
             p.src == PROPOSER.get(s.round),
         } 
 
-
         // Apply Guards
         val proposals = messages.get_proposals()
         val enabled_proposals = proposals.filter(p => and {
@@ -180,20 +183,17 @@ module tendermint {
         def effect_builder = (p) => {
             // Broadcast the PreVote message for the proposal
             if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
-                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) }))))
+                Set(glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
             } else {
-                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))))
+                Set(glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
             }
         } 
         
-        
-        // Map the enabled proposals to effects and teh corresponding state updates
+        // Map the enabled proposals to effects and the corresponding state updates
         val outputs = enabled_proposals.map(p => {
-            state: { ...s, stage: PreVoteStage},
-            effects: effect_builder(p).union(
-                Set(Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round })))
-            )
-            // TODO -> add logging effect to collect evidence
+            post_state: { ...s, stage: PreVoteStage},
+            effects: effect_builder(p)
+            // TODO -> add timeout and logging effects
             }   
         )
         outputs
@@ -201,9 +201,11 @@ module tendermint {
     }
 
     pure def upon_proposal_in_propose_prevote(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
+        input: LocalContext
+    ): Set[Transition] = {
+        val s = input.state
+        val messages = input.messages
+        
         val state_guard = and {
             s.stage == PreVoteStage,
         }
@@ -226,17 +228,15 @@ module tendermint {
         def effect_builder = (p) => {
             // Broadcast the PreVote message for the proposal
             if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
-                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))}))))
+                Set(glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
             } else {
-                Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None }))))
+                Set(glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
             }
         }
 
         val outputs = enabled_proposals.map(p => {
-            state: { ...s, stage: PreVoteStage},
-            effects: effect_builder(p).union(
-                Set(Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
-            )
+            post_state: { ...s, stage: PreVoteStage},
+            effects: effect_builder(p)
         }
         )
         outputs 
@@ -244,6 +244,8 @@ module tendermint {
         
     
     //this can be skipped for now
+    // TODO: Update to work with glyph library
+    /*
     pure def upon_quorum_prevotes_any(
         s: LocalState,
         messages: Set[Message]
@@ -266,11 +268,13 @@ module tendermint {
             Set()
         } 
     }
+    */
 
     pure def upon_quorum_nil_prevotes(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
+        input: LocalContext
+    ): Set[Transition] = {
+        val s = input.state
+        val messages = input.messages
         
         val state_guard = and {
             s.stage == PreVoteStage,
@@ -284,9 +288,8 @@ module tendermint {
         if (quorum and state_guard) {
             // If we have a quorum, we can move to precommit stage
             val outputs = Set({
-                state: { ...s, stage: PreCommitStage},
-                effects: Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
-                            , Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
+                post_state: { ...s, stage: PreCommitStage},
+                effects: Set(glyph::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
             })
             outputs
         } else {
@@ -294,6 +297,8 @@ module tendermint {
         }
     }
             
+    // TODO: Update to work with glyph library
+    /*        
     pure def upon_quorum_precommits_any(
         s: LocalState,
         messages: Set[Message]
@@ -318,11 +323,13 @@ module tendermint {
             Set()
         } 
     }
+    */
 
     pure def upon_proposal_in_prevote_commit(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
+        input: LocalContext
+    ): Set[Transition] = {
+        val s = input.state
+        val messages = input.messages
         
         val state_guard = and {
             s.stage.in(Set(PreVoteStage, PreCommitStage))
@@ -349,8 +356,7 @@ module tendermint {
         def effect_builder = (p) => {
             if (s.stage == PreVoteStage) {
                 // If in prevote stage, broadcast precommit and move to precommit stage
-                Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) }))),
-                    Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
+                Set(glyph::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
             } else {
                 // If already in precommit stage, just update valid value
                 Set()
@@ -377,7 +383,7 @@ module tendermint {
         }
 
         val outputs = enabled_proposals.map(p => {
-            state: state_builder(p),
+            post_state: state_builder(p),
             effects: effect_builder(p)
         })
         
@@ -385,9 +391,10 @@ module tendermint {
     }
 
     pure def upon_proposal_in_precommit_no_decision(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] = {
+        input: LocalContext
+    ): Set[Transition] = {
+        val s = input.state
+        val messages = input.messages
         
         val state_guard = and {
             s.decision == None
@@ -411,11 +418,6 @@ module tendermint {
             }).map(pc => pc.src).size() >= 2 * F + 1
         })
 
-        def effect_builder = (p) => {
-            // Decision is made, broadcast finalize
-            Set(Ext(Finalize))
-        }
-
         def state_builder = (p) => {
             // Make decision and move to decided stage
             { ...s,
@@ -425,13 +427,15 @@ module tendermint {
         }
 
         val outputs = enabled_proposals.map(p => {
-            state: state_builder(p),
-            effects: effect_builder(p)
+            post_state: state_builder(p),
+            effects: Set()  // No effects needed for decision
         })
         
         outputs
     }
 
+    // TODO: Update timeout functions to work with glyph library
+    /*
     pure def on_propose_timeout(
         s: LocalState,
         t: Set[TimeoutEvent]
@@ -492,23 +496,23 @@ module tendermint {
         else 
             Set()
     }
+    */
     
     pure def main_listener(
-        s: LocalState,
-        messages: Set[Message]
-    ): Set[ListenerOutput] =
+        input: LocalContext
+    ): Set[Transition] =
         val outputs = Set (
-            upon_proposal_in_propose(s,messages),
-            upon_proposal_in_propose_prevote(s,messages),
-            upon_proposal_in_precommit_no_decision(s,messages),
-            upon_proposal_in_prevote_commit(s,messages),
-            //upon_quorum_prevotes_any(s,messages), 
-            upon_quorum_nil_prevotes(s,messages),
-            //upon_quorum_precommits_any(s,messages), 
-            //on_propose_timeout(s, timeouts),
-            //on_prevote_timeout(s, timeouts),
-            //on_precommit_timeout(s, timeouts)
-        ).flatten().filter(o => o.effects.size() > 0 or o.state != s)
+            upon_proposal_in_propose(input),
+            upon_proposal_in_propose_prevote(input),
+            upon_proposal_in_precommit_no_decision(input),
+            upon_proposal_in_prevote_commit(input),
+            //upon_quorum_prevotes_any(input), 
+            upon_quorum_nil_prevotes(input),
+            //upon_quorum_precommits_any(input), 
+            //on_propose_timeout(input),
+            //on_prevote_timeout(input),
+            //on_precommit_timeout(input)
+        ).flatten()
         outputs
 
 
@@ -577,37 +581,23 @@ module tendermint {
     
     type GlobalState = GlobalContext
 
-    pure def apply_effects(
-        env: GlobalState,
-        n: Node,
-        effects: Set[Effect]
-    ): GlobalState =
-        effects.fold(env, (currentEnv, effect) =>
-            match effect {
-            | Ext(ext) =>
-                match ext {
-                    | Broadcast(msg) => GNet::broadcast(currentEnv, msg)
-                    | Finalize => currentEnv
-                }
-            | Inter(inte) =>
-                match inte {
-                    | StartTimeout(event) => currentEnv
-                }
-            | Log(log) =>
-                match log {
-                    | CollectEvidence(msg) =>
-                        currentEnv
-                }
-        }
+    action init = glyph::init({
+        system: NODES.mapBy(n => initialize_process(n)),
+        messages: NODES.mapBy(n => Set(initial_message).union(byzantine_messages)),
+        events: NODES.mapBy(n => Set()),
+        extensions: initial_bookkeeping
+    })
+
+    action step = glyph::step(
+        main_listener,
+        (c, _) => c,
+        (e, p) => e, // env to local context
     )
 
 
-
-    action init = GD::init(initialize_process, initial_bookkeeping)
-    action step = GD::step(main_listener, apply_effects)
-
-
   // -------------------------------- semantic symmetry utilities --------------------------------
+  // TODO: Update these functions to work with glyph library
+  /*
   type StateFingerprint = {
     round: Round,
     stage: Stage,
@@ -646,15 +636,16 @@ module tendermint {
       acc.setByWithDefault(key, (e) => e.setAdd(state.process_id),Set())
     })
   }
+  */
   // -------------------------------- semantic symmetry utilities --------------------------------
 
-    val correct_nodes = GD::s.system.values().filter(s => s.process_id.in(CORRECT))
+    val correct_nodes = glyph::s.system.values().filter(s => s.process_id.in(CORRECT))
     val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
         p1.decision == None or p2.decision == None or p1.decision == p2.decision})
     
     val one_decided =
         not( 
-            GD::s.system.values().forall(v => v.decision == None)
+            glyph::s.system.values().forall(v => v.decision == None)
         )
     
     val all_decided =
@@ -666,10 +657,10 @@ module tendermint {
     // state
     val stages = 
         and{
-            GD::s.system.values().map(v => v.stage).contains(ProposeStage), 
-            GD::s.system.values().map(v => v.stage).contains(PreVoteStage), 
-            GD::s.system.values().map(v => v.stage).contains(PreCommitStage),
-            GD::s.system.values().map(v => v.stage).contains(DecidedStage)
+            glyph::s.system.values().map(v => v.stage).contains(ProposeStage), 
+            glyph::s.system.values().map(v => v.stage).contains(PreVoteStage), 
+            glyph::s.system.values().map(v => v.stage).contains(PreCommitStage),
+            glyph::s.system.values().map(v => v.stage).contains(DecidedStage)
         }
         
 
