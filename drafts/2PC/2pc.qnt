@@ -27,7 +27,7 @@ module two_phase_commit {
   /* Boilerplate */
   type LocalState = glyph::LocalState[Node, StateFields]
   type LocalContext = glyph::LocalContext[Node, StateFields, Message, Event, Extensions]
-  type Transition = glyph::Transition[Node, StateFields, Message, CustomEffects]
+  type Transition = glyph::Transition[Node, StateFields, Message, Event, CustomEffects]
   type GlobalContext = glyph::GlobalContext[
     Node,
     StateFields,
