@@ -1,6 +1,7 @@
 // -*- mode: Bluespec; -*-
 module tendermint {
-    import basicSpells.* from "lib/basicSpells"
+    import basicSpells.* from "../../ux/set-based/lib/basicSpells"
+    import glyph(processes = NODES) as glyph from "../../ux/set-based/lib/glyph"
 
 
     type Round = int    
@@ -12,8 +13,7 @@ module tendermint {
     type ValueId = { hashed: Value }
     type Node = str
 
-    type LocalState = {
-        process_id: Node,
+    type StateFields = {
         round: Round,
         stage: Stage,
         decision: Option[Value],
@@ -43,13 +43,30 @@ module tendermint {
         | PreVote(PreVoteMsg)
         | PreCommit(PreVoteMsg)
 
-    
+    type CustomEffects = ()
+    type Event = ()
+    type Extensions = ()
+
+    /* Boilerplate */
+    type LocalState = glyph::LocalState[Node, StateFields]
+    type LocalContext = glyph::LocalContext[Node, StateFields, Message, Event, Extensions]
+    type Transition = glyph::Transition[Node, StateFields, Message, CustomEffects]
+    type GlobalContext = glyph::GlobalContext[
+        Node,
+        StateFields,
+        Message,
+        Event,
+        Extensions
+    ]
+    /* End of boilerplate */
 
     type Bookkeeping = {
         evidence_propose: Set[ProposeMsg],
         evidence_prevote: Set[PreVoteMsg],
         evidence_precommit: Set[PreVoteMsg],
     }
+
+    type ListenerOutput = Set[Transition]
 
     type TimeoutKind = ProposeTimeout | PreVoteTimeout | PreCommitTimeout
     type TimeoutEvent = { kind: TimeoutKind, round: Round}
@@ -69,11 +86,6 @@ module tendermint {
       | Ext(ExternalEffect)
       | Inter(InternalEffect)
       | Log(LoggingEffect)
-
-    type ListenerOutput = {
-        effects: Set[Effect],
-        state: LocalState,
-    }
 
     pure def get_proposals(messages: Set[Message]): Set[ProposeMsg] =
         messages.filterMap(m => {
@@ -483,8 +495,7 @@ module tendermint {
     
     pure def main_listener(
         s: LocalState,
-        messages: Set[Message],
-        timeouts: Set[TimeoutEvent]
+        messages: Set[Message]
     ): Set[ListenerOutput] =
         val outputs = Set (
             upon_proposal_in_propose(s,messages),
@@ -494,9 +505,9 @@ module tendermint {
             //upon_quorum_prevotes_any(s,messages), 
             upon_quorum_nil_prevotes(s,messages),
             //upon_quorum_precommits_any(s,messages), 
-            on_propose_timeout(s, timeouts),
-            on_prevote_timeout(s, timeouts),
-            on_precommit_timeout(s, timeouts)
+            //on_propose_timeout(s, timeouts),
+            //on_prevote_timeout(s, timeouts),
+            //on_precommit_timeout(s, timeouts)
         ).flatten().filter(o => o.effects.size() > 0 or o.state != s)
         outputs
 
@@ -564,48 +575,8 @@ module tendermint {
     }
 
     
-    type GlobalState = {
-        system: Node -> LocalState,
-        message_buffer: Node -> Set[Message],
-        internal_buffer: Node -> Set[TimeoutEvent],
-        logging: Bookkeeping,
-    }
+    type GlobalState = GlobalContext
 
-    pure def broadcast(
-        env: GlobalState,
-        msg: Message
-  ): GlobalState = {
-    { ...env,
-      message_buffer: env.message_buffer.transformValues(v => v.setAdd(msg))
-    }
-    }
-
-    pure val TIMEOUT_ORDER = Map(ProposeTimeout -> 0, PreVoteTimeout -> 1, PreCommitTimeout -> 2)
-    pure def should_replace(t1: TimeoutEvent, t2: TimeoutEvent): bool = {
-        TIMEOUT_ORDER.get(t2.kind) > TIMEOUT_ORDER.get(t1.kind) or t2.round > t1.round
-    }
-
-    pure def add_timeout(
-        env: GlobalState,
-        v: Node,
-        timeout: TimeoutEvent,
-        should_replace: (TimeoutEvent, TimeoutEvent) => bool
-    ): GlobalState = {
-        val current = env.internal_buffer.get(v)
-        if (current.empty())
-            { ...env,
-              internal_buffer: env.internal_buffer.put(v, Set(timeout))
-            }
-        else if (current.exists(t => should_replace(t, timeout)))
-            { ...env,
-              internal_buffer: env.internal_buffer.put(v, Set(timeout))
-            }  
-        else 
-            env
-        
-       
-    } 
-    
     pure def apply_effects(
         env: GlobalState,
         n: Node,
@@ -615,12 +586,12 @@ module tendermint {
             match effect {
             | Ext(ext) =>
                 match ext {
-                    | Broadcast(msg) => broadcast(currentEnv, msg)
+                    | Broadcast(msg) => GNet::broadcast(currentEnv, msg)
                     | Finalize => currentEnv
                 }
             | Inter(inte) =>
                 match inte {
-                    | StartTimeout(event) => add_timeout(currentEnv, n, event, should_replace)
+                    | StartTimeout(event) => currentEnv
                 }
             | Log(log) =>
                 match log {
@@ -632,51 +603,8 @@ module tendermint {
 
 
 
-    var s : GlobalState
-    action init = all {
-        //nondet byz = byzantine_messages.powerset().oneOf()
-        val byz = byzantine_messages
-        s' = {
-            system: NODES.mapBy(v => initialize_process(v)),
-            internal_buffer: NODES.mapBy(v => Set()),
-            message_buffer: NODES.mapBy(v => Set(initial_message).union(byz)),
-            logging: initial_bookkeeping,
-        }
-    }
-    
-    action step = {
-        nondet process = oneOf(CORRECT.filter(v => s.message_buffer.get(v)!= Set() or s.internal_buffer.get(v) != Set()))
-        val msgs = s.message_buffer.get(process)
-        val timeouts = s.internal_buffer.get(process)
-        val current_state = s.system.get(process)
-        val valid_transitions = main_listener(current_state, msgs, timeouts)
-        all {
-            valid_transitions != Set(),
-            // choose one of the valid transitions
-            nondet transition = oneOf(valid_transitions)
-            // apply the effects of the transition
-            val s_eff = apply_effects(s, process, transition.effects)
-            val s_next = {...s_eff, system: s_eff.system.put(process, transition.state)}
-            s' = s_next
-        }
-    }
-
-    action step_o1 = {
-        val r = select_representatives(s)
-        nondet process = r.oneOf() 
-        val msgs = s.message_buffer.get(process)
-        val current_state = s.system.get(process)
-        val valid_transitions = main_listener(current_state, msgs, Set())
-        all {
-            valid_transitions != Set(),
-            // choose one of the valid transitions
-            nondet transition = oneOf(valid_transitions)
-            // apply the effects of the transition
-            val s_eff = apply_effects(s, process, transition.effects)
-            val s_next = {...s_eff, system: s_eff.system.put(process, transition.state)}
-            s' = s_next
-        }
-    }
+    action init = GD::init(initialize_process, initial_bookkeeping)
+    action step = GD::step(main_listener, apply_effects)
 
 
   // -------------------------------- semantic symmetry utilities --------------------------------
@@ -720,13 +648,13 @@ module tendermint {
   }
   // -------------------------------- semantic symmetry utilities --------------------------------
 
-    val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
+    val correct_nodes = GD::s.system.values().filter(s => s.process_id.in(CORRECT))
     val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
         p1.decision == None or p2.decision == None or p1.decision == p2.decision})
     
     val one_decided =
         not( 
-            s.system.values().forall(v => v.decision == None)
+            GD::s.system.values().forall(v => v.decision == None)
         )
     
     val all_decided =
@@ -738,10 +666,10 @@ module tendermint {
     // state
     val stages = 
         and{
-            s.system.values().map(v => v.stage).contains(ProposeStage), 
-            s.system.values().map(v => v.stage).contains(PreVoteStage), 
-            s.system.values().map(v => v.stage).contains(PreCommitStage),
-            s.system.values().map(v => v.stage).contains(DecidedStage)
+            GD::s.system.values().map(v => v.stage).contains(ProposeStage), 
+            GD::s.system.values().map(v => v.stage).contains(PreVoteStage), 
+            GD::s.system.values().map(v => v.stage).contains(PreCommitStage),
+            GD::s.system.values().map(v => v.stage).contains(DecidedStage)
         }
         
 
