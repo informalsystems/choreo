@@ -91,7 +91,7 @@ module glyph {
     s' = e
   }
 
-  action step (
+  action step(
     listener: Listener[p, s, m, e, l, extensions],
     apply_effect: EffectProcessor[p, s, m, e, l, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
@@ -101,7 +101,7 @@ module glyph {
     nondet v = oneOf(processes)
     val input = convert_context(s, v, local_to_global_extensions)
     val ls = s.system.get(v)
-    val transitions = listener(ls, input)
+    val transitions = listener(ls, input).filter(t => t.effects.size() > 0 or t.post_state != ls)
     all {
       transitions.size() > 0,
       nondet transition = oneOf(transitions)

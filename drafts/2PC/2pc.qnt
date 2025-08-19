@@ -124,19 +124,18 @@ module two_phase_commit {
     }
   }
 
-   // --- Main Listener --------------------------------------------------------
   pure def main_listener(
     s: LocalState,
     c: LocalContext
   ): Set[Transition] = {
     Set(
-     spontaneously_prepares(s, c.messages),
-     spontaneously_aborts(s, c.messages),
-     aborts_as_instructed(s, c.messages),
-     commits_as_instructed(s, c.messages),
-     decides_on_commit(s, c.messages),
-     decides_on_abort(s, c.messages)
-    ).flatten().filter(o => o.effects.size() > 0 or o.post_state != s)
+      spontaneously_prepares(s, c.messages),
+      spontaneously_aborts(s, c.messages),
+      aborts_as_instructed(s, c.messages),
+      commits_as_instructed(s, c.messages),
+      decides_on_commit(s, c.messages),
+      decides_on_abort(s, c.messages)
+    ).flatten()
   }
 
   pure def apply_effect(env: GlobalContext, v: Node, tr: Transition): GlobalContext = {
