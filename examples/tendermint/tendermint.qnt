@@ -59,7 +59,7 @@ module tendermint {
   /* Boilerplate */
   type LocalState = glyph::LocalState[Node, StateFields]
   type LocalContext = glyph::LocalContext[Node, StateFields, Message, Event, Extensions]
-  type Transition = glyph::Transition[Node, StateFields, Message, CustomEffects]
+  type Transition = glyph::Transition[Node, StateFields, Message, Event, CustomEffects]
   type GlobalContext = glyph::GlobalContext[
     Node,
     StateFields,
@@ -216,32 +216,26 @@ module tendermint {
   }
 
 
-  //this can be skipped for now
-  // TODO: Update to work with glyph library
-  /*
-  pure def upon_quorum_prevotes_any(
-      s: LocalState,
-      messages: Set[Message]
-  ): Set[ListenerOutput] = {
+  pure def upon_quorum_prevotes_any(input: LocalContext): Set[Transition] = {
+    val s = input.state
+    val messages = input.messages
 
-      // Do we have a quorum of PreVotes in the current round
-      def message_guard = (pv) => (pv.round == s.round)
-      val quorum = messages.get_pre_votes().filter(pv => and {
-          message_guard(pv),
-      }).size() >= 2 * F + 1 // quorum size is F + 1
+    // Do we have a quorum of PreVotes in the current round
+    def message_guard = (pv) => (pv.round == s.round)
+    val quorum = messages.get_pre_votes().filter(pv => and {
+        message_guard(pv),
+    }).size() >= 2 * F + 1 // quorum size is F + 1
 
-      if (quorum) {
-          // If we have a quorum, we can move to precommit stage
-          val outputs = Set({
-              state: s,
-              effects: Set(Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round })))
-          })
-          outputs
-      } else {
-          Set()
-      }
+    if (quorum) {
+      // If we have a quorum, we can move to precommit stage
+      Set({
+        post_state: s,
+        effects: Set(glyph::TriggerEvent({ kind: PreVoteTimeout, round: s.round }))
+      })
+    } else {
+      Set()
+    }
   }
-  */
 
   pure def upon_quorum_nil_prevotes(input: LocalContext): Set[Transition] = {
     val s = input.state
@@ -470,7 +464,7 @@ module tendermint {
       upon_proposal_in_propose_prevote(input),
       upon_proposal_in_precommit_no_decision(input),
       upon_proposal_in_prevote_commit(input),
-      //upon_quorum_prevotes_any(input),
+      upon_quorum_prevotes_any(input),
       upon_quorum_nil_prevotes(input),
       //upon_quorum_precommits_any(input),
       //on_propose_timeout(input),
@@ -527,22 +521,22 @@ module tendermint {
     Set(byzantine_prevotes, byzantine_precommits, byzantine_proposals).flatten()
   }
 
+  // TODO (Gabriela): I don't understand this
   val byzantine_messages = {
-      // We can have at most 2^F faulty nodes, so we take the powerset of the byzantine messages
-      // to simulate all possible combinations of byzantine messages.
+    // We can have at most 2^F faulty nodes, so we take the powerset of the byzantine messages
+    // to simulate all possible combinations of byzantine messages.
 
-      // 10 dummy prevotes for future rounds
-      val dummy_prevotes = 1000.to(1025).map(r => {
-          PreVote({ src: "p4", round: r, id: None })
-      })
-      dummy_prevotes
-      //Set()
+    // 10 dummy prevotes for future rounds
+    val dummy_prevotes = 1000.to(1025).map(r => {
+        PreVote({ src: "p4", round: r, id: None })
+    })
+    dummy_prevotes
+    //Set()
   }
-
 
   action init = glyph::init({
     system: NODES.mapBy(n => initialize_process(n)),
-    messages: NODES.mapBy(n => Set(initial_message).union(byzantine_messages)),
+    messages: NODES.mapBy(n => Set(initial_message).union(byzantine_messages_1)),
     events: NODES.mapBy(n => Set()),
     extensions: initial_bookkeeping
   })
@@ -641,9 +635,11 @@ module tendermint {
 
   /// The set of all correct values (prepared by the constants)
   //pure val VALID_VALUES = ROUNDS.filter(k => PROPOSER.get(k).in(CORRECT)).map(k => VALUES.get(k))
-  pure val VALID_VALUES = Set("v0","v1", "v2")
-}
+  pure val VALID_VALUES = Set("v0", "v1", "v2")
 
+  action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
+    glyph::step_with(v, listener, (c, _) => c, (e, p) => e)
+}
 
 module valid {
   import tendermint(
@@ -661,8 +657,25 @@ module no_agreement {
     F = 1,
     CORRECT = Set("p2", "p3"),
     FAULTY = Set("p1","p4"),
-    PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
+    // a faulty node is the proposer in the first round
+    PROPOSER = Map(0 -> "p3", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
     VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
     MAX_ROUND = 4
   ).*
+
+  run disagreementTest = init
+    .then(step_with("p1", upon_proposal_in_propose))
+    .then(step_with("p2", upon_proposal_in_propose))
+    // .then(step_with_filter("p1", upon_quorum_prevotes_any, tr => tr.effects.exists(e => {
+    //   match e {
+    //     | Broadcast(m) => match m {
+    //       | PreVote(p) => p.value == "v0"
+    //       | _ => false
+    //     }
+    //     | _ => false
+    //   }
+    // })))
+    // .then(step_with("p2", upon_quorum_prevotes_any))
+    // .then(step_with("p1", upon_quorum_precommits_any))
+    // .then(step_with("p2", upon_quorum_precommits_any))
 }

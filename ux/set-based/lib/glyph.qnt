@@ -17,9 +17,9 @@ module glyph {
     | ext
   }
 
-  type Transition[p, s, m, ce] = {
+  type Transition[p, s, m, e, ce] = {
     post_state: LocalState[p, s],
-    effects: Set[Effect[p, m, ce]],
+    effects: Set[Effect[p, m, e, ce]],
   }
 
   type GlobalContext[p, s, m, e, ext] = {
@@ -38,7 +38,7 @@ module glyph {
 
   // This is the message routing to the # handler
   type Listener[p, s, m, e, ce, ext] =
-    (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, ce]]
+    (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, e, ce]]
 
   type EffectProcessor[p, s, m, e, ce, ext] =
     (GlobalContext[p, s, m, e, ext], ce) => GlobalContext[p, s, m, e, ext]
@@ -46,15 +46,16 @@ module glyph {
   type ExtensionsConverter[p, l, g] =
     (g, p) => l
 
-  type Effect[p, m, ce] =
+  type Effect[p, m, e, ce] =
     | Broadcast(m)
     | Send({ to: p, message: m })
+    | TriggerEvent(e)
     | CustomEffect(ce)
 
   pure def apply_effect(
     env: GlobalContext[p, s, m, e, ext],
     v: p,
-    tr: Transition[p, s, m, ce],
+    tr: Transition[p, s, m, e, ce],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, ext]
   ): GlobalContext[p, s, m, e, ext] = {
     val env1 = { ...env, system: env.system.setBy(v, s => tr.post_state) }
@@ -66,6 +67,9 @@ module glyph {
         }
         | Send(r) => {
           { ...e, messages: e.messages.setBy(r.to, b => b.setAdd(r.message)) }
+        }
+        | TriggerEvent(ev) => {
+          { ...e, events: e.events.setBy(v, b => b.setAdd(ev)) }
         }
         | CustomEffect(ex) => {
           apply_custom_effect(e, ex)
