@@ -8,100 +8,108 @@
  * Informal Systems, 2025
  */
 
-module glyphsBase {
+module glyph {
   import basicSpells.* from "basicSpells"
 
-  type LocalState[process_id, message, other_fields] = {
-    process_id: process_id,
-    message_buffer: Set[message] // can be moved to GlobalState
-    //internal_events_buffer: Set[e] 
-    | other_fields
+  type LocalState[process_id, ext] = {
+    process_id: process_id
+    | ext
   }
 
-  type ListenerOutput[state, effect] = {
+  type Transition[state, effect] = {
+    post_state: state,
     effects: Set[effect],
-    state: state,
   }
 
-  type GlobalState[p, s, m, b] = {
-    system: p -> LocalState[p, m, s],
-    logging: b
+  type GlobalContext[p, s, m, e, ext] = {
+    system: p -> LocalState[p, s],
+    messages: p -> Set[m],
+    events: p -> Set[e],
+    extensions: ext
+  }
+
+  type LocalContext[m, e, ext] = {
+    messages: Set[m],
+    events: Set[e],
+    extensions: ext
   }
 
   // This is the message routing to the # handler
-  type Listener[p, s, m, o] = (LocalState[p, m, s], Set[m]) => Set[ListenerOutput[LocalState[p, m, s], o]]
+  type Listener[p, s, m, e, ef, ext] =
+    (LocalState[p, s], LocalContext[m, e, ext]) => Set[Transition[LocalState[p, s], ef]]
 
-  type ApplyEffect[p, s, m, o, b] =
-    (GlobalState[p, s, m, b], p, Set[o]) => GlobalState[p, s, m, b]
-  
-  pure def logging(env: GlobalState[p, s, m,  b], f: b => b): GlobalState[p, s, m, b] = {
-    { ...env, logging: f(env.logging)}
-  }
+  type EffectProcessor[p, s, m, e, ef, ext] =
+    (GlobalContext[p, s, m, e, ext], p, Transition[LocalState[p, s], ef]) => GlobalContext[p, s, m, e, ext]
 
-}
-
-module glyphNetwork {
-
-  import basicSpells.* from "basicSpells"
-  import glyphsBase.*
+  type ExtensionsConverter[p, l, g] =
+    (g, p) => l
 
   pure def broadcast(
-    env: GlobalState[p, s, m, b],
+    env: GlobalContext[p, s, m, e, ext],
     msg: m
-  ): GlobalState[p, s, m, b] = {
+  ): GlobalContext[p, s, m, e, ext] = {
     { ...env,
-      system: env.system.transformValues(s => { ...s, message_buffer: s.message_buffer.setAdd(msg) })
+      messages: env.messages.transformValues(s => s.setAdd(msg))
     }
   }
 
   pure def send(
-    env: GlobalState[p, s, m, b],
+    env: GlobalContext[p, s, m, e, ext],
     v: p,
     msg: m
-  ): GlobalState[p, s, m, b] = {
+  ): GlobalContext[p, s, m, e, ext] = {
     { ...env,
-      system: env.system.set(v, { ...env.system.get(v), message_buffer: env.system.get(v).message_buffer.setAdd(msg) })
+      messages: env.messages.setBy(v, s => s.setAdd(msg))
     }
   }
-
-}
-
-module glyphDriver {
-  import basicSpells.* from "basicSpells"
-  import glyphsBase.*
 
   const processes: Set[p]
-  var s: GlobalState[p, s, m, b]
+  var s: GlobalContext[p, s, m, e, ext]
 
-  type InitializeProcess[p, m, s] = (p) => LocalState[p, m, s]
-
-  action init(
-    initialize_process: InitializeProcess[p, m, s],
-    initial_logging: b
-  ): bool = all {
-    s' = {
-      system: processes.mapBy(v => initialize_process(v)),
-      logging: initial_logging,
+  pure def initialize(x: a, f: Option[(a) => Set[b]]): Set[b] = {
+    match f {
+      | Some(fun) => fun(x)
+      | None => Set()
     }
   }
 
-
-  action step(
-    ev_listener: Listener[p, s, m, o],
-    apply_effect: ApplyEffect[p, s, m, o, b]
-  ): bool = {
-    nondet process = oneOf(processes.filter(v => s.system.get(v).message_buffer != Set()))
-    val msgs = s.system.get(process).message_buffer
-    val initial = s.system.get(process)
-    val valid_transitions = ev_listener(initial, msgs)
-    all {
-      valid_transitions != Set(),
-      // choose one of the valid transitions
-      nondet transition = oneOf(valid_transitions)
-      // apply the effects of the transition
-      val gs = apply_effect(s, process, transition.effects)
-      val gs1 = {...gs, system: gs.system.put(process, q::debug("test",transition.state))}
-      s' = gs1
+  pure def convert_context(
+    env: GlobalContext[p, s, m, e, ext],
+    v: p,
+    local_to_global_extensions: ExtensionsConverter[p, ext, local_ext]
+  ): LocalContext[m, e, local_ext] = {
+    {
+      messages: env.messages.get(v),
+      events: env.events.get(v),
+      extensions: local_to_global_extensions(env.extensions, v)
     }
+  }
+
+  // TODO: displayer
+
+  action init(e: GlobalContext[p, s, m , e, ext]): bool = {
+    s' = e
+  }
+
+  action step (
+    listener: Listener[p, s, m, e, l, extensions],
+    apply_effect: EffectProcessor[p, s, m, e, l, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    // displayer: Displayer[p, s, m, te, l, extensions, d],
+    more_byzantines: Set[m]
+  ): bool = all {
+    nondet v = oneOf(processes)
+    val input = convert_context(s, v, local_to_global_extensions)
+    val ls = s.system.get(v)
+    val transitions = listener(ls, input)
+    all {
+      transitions.size() > 0,
+      nondet transition = oneOf(transitions)
+      val post_env = apply_effect(s, v, transition)
+      all {
+        s' = post_env,
+        // display' = displayer(post_env)
+      }
+    },
   }
 }

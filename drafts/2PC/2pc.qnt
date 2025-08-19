@@ -1,8 +1,8 @@
 // -*- mode: Bluespec; -*-
 
 module two_phase_commit {
-  import basicSpells.* from "lib/basicSpells"
-  import csmi(processes = NODES) as csmi from "lib/csmi"
+  import basicSpells.* from "../../ux/set-based/lib/basicSpells"
+  import glyph(processes = NODES) as glyph from "../../ux/set-based/lib/glyph"
 
   // --- Types ----------------------------------------------------------------
   type Node = str
@@ -21,22 +21,27 @@ module two_phase_commit {
   type Effect =
     | Broadcast(Message)
 
-  type LocalState = csmi::LocalState[Node, {
+  type StateFields = {
     role: Role,
     stage: Stage,
-  }]
+  }
 
-  type LocalContext = csmi::LocalContext[Message, (), ()]
-  type Transition = csmi::Transition[LocalState, Effect]
+  type Event = ()
+  type Extensions = ()
 
-  type Environment = csmi::Environment[
+
+  /* Boilerplate */
+  type LocalState = glyph::LocalState[Node, StateFields]
+  type LocalContext = glyph::LocalContext[Message, Event, Extensions]
+  type Transition = glyph::Transition[LocalState, Effect]
+  type GlobalContext = glyph::GlobalContext[
     Node,
-    LocalState,
+    StateFields,
     Message,
-    (),
-    (),
-    ()
+    Event,
+    Extensions
   ]
+  /* End of boilerplate */
 
   pure def get_prepared_msgs(msgs: Set[Message]): Set[Node] = {
     msgs.filterMap(m => match m {
@@ -52,7 +57,7 @@ module two_phase_commit {
     } else {
       Set({
         effects: Set(Broadcast(ParticipantPrepared(s.process_id))),
-        postState: { ...s, stage: Prepared }
+        post_state: { ...s, stage: Prepared }
       })
     }
   }
@@ -63,7 +68,7 @@ module two_phase_commit {
     } else {
       Set({
         effects: Set(),
-        postState: { ...s, stage: Aborted }
+        post_state: { ...s, stage: Aborted }
       })
     }
   }
@@ -74,7 +79,7 @@ module two_phase_commit {
     } else {
       Set({
         effects: Set(),
-        postState: { ...s, stage: Aborted }
+        post_state: { ...s, stage: Aborted }
       })
     }
   }
@@ -85,7 +90,7 @@ module two_phase_commit {
     } else {
       Set({
         effects: Set(),
-        postState: { ...s, stage: Committed }
+        post_state: { ...s, stage: Committed }
       })
     }
   }
@@ -100,7 +105,7 @@ module two_phase_commit {
     } else {
       Set({
         effects: Set(Broadcast(CoordinatorCommit)),
-        postState: { ...s, stage: Committed }
+        post_state: { ...s, stage: Committed }
       })
     }
   }
@@ -114,7 +119,7 @@ module two_phase_commit {
     } else {
       Set({
         effects: Set(Broadcast(CoordinatorAbort)),
-        postState: { ...s, stage: Aborted }
+        post_state: { ...s, stage: Aborted }
       })
     }
   }
@@ -125,21 +130,21 @@ module two_phase_commit {
     c: LocalContext
   ): Set[Transition] = {
     Set(
-     spontaneously_prepares(s, c.msgBuffer),
-     spontaneously_aborts(s, c.msgBuffer),
-     aborts_as_instructed(s, c.msgBuffer),
-     commits_as_instructed(s, c.msgBuffer),
-     decides_on_commit(s, c.msgBuffer),
-     decides_on_abort(s, c.msgBuffer)
-    ).flatten().filter(o => o.effects.size() > 0 or o.postState != s)
+     spontaneously_prepares(s, c.messages),
+     spontaneously_aborts(s, c.messages),
+     aborts_as_instructed(s, c.messages),
+     commits_as_instructed(s, c.messages),
+     decides_on_commit(s, c.messages),
+     decides_on_abort(s, c.messages)
+    ).flatten().filter(o => o.effects.size() > 0 or o.post_state != s)
   }
 
-  pure def apply_effect(env: Environment, v: Node, tr: Transition): Environment = {
-    val env1 = { ...env, system: env.system.setBy(v, s => tr.postState) }
+  pure def apply_effect(env: GlobalContext, v: Node, tr: Transition): GlobalContext = {
+    val env1 = { ...env, system: env.system.setBy(v, s => tr.post_state) }
     tr.effects.fold(env1, (e, x) => {
       match x {
         | Broadcast(m) => {
-          { ...e, msgBuffer: e.msgBuffer.transformValues(b => b.setAdd(m)) }
+          { ...e, messages: e.messages.transformValues(b => b.setAdd(m)) }
         }
       }
     })
@@ -158,39 +163,26 @@ module two_phase_commit {
     }
   }
 
-  action init = csmi::init(
-    initialize,
-    (_) => Set(), // no initial/byzantine messages
-    (_) => Set(), // no timeouts
-    {
-      system: Map(),
-      msgBuffer: Map(),
-      internalBuffer: Map(),
-      logging: (),
-    },
-    (d) => d,
-  )
+  action init = glyph::init({
+    system: NODES.mapBy(n => initialize(n)),
+    messages: NODES.mapBy(n => Set()),
+    events: NODES.mapBy(n => Set()),
+    extensions: ()
+  })
 
-  pure def env_to_local_context(env: Environment, process_id: Node): LocalContext =
-    {
-      msgBuffer: env.msgBuffer.getOrElse(process_id, Set()),
-      internalBuffer: env.internalBuffer.getOrElse(process_id, Set()),
-    }
-
-  action step = csmi::step(
+  action step = glyph::step(
     main_listener,
     apply_effect,
-    env_to_local_context, // env to local context,
-    (d) => d, // displayer
+    (e, p) => e, // env to local context,
     Set() // more byzantines
   )
 
   val consistency = PARTICIPANTS.forall(p1 => {
     PARTICIPANTS.forall(p2 => {
-      not(csmi::s.system.get(p1).stage == Committed
-        and csmi::s.system.get(p2).stage == Aborted)
+      not(glyph::s.system.get(p1).stage == Committed
+        and glyph::s.system.get(p2).stage == Aborted)
     })
   })
 
-  val wit_commit = PARTICIPANTS.exists(p => csmi::s.system.get(p).stage != Committed)
+  val wit_commit = PARTICIPANTS.exists(p => glyph::s.system.get(p).stage != Committed)
 }
