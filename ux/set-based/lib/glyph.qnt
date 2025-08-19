@@ -11,6 +11,7 @@
 module glyph {
   import basicSpells.* from "basicSpells"
 
+  // TODO: try moving process id to local context
   type LocalState[process_id, ext] = {
     process_id: process_id
     | ext
@@ -28,7 +29,8 @@ module glyph {
     extensions: ext
   }
 
-  type LocalContext[m, e, ext] = {
+  type LocalContext[p, s, m, e, ext] = {
+    state: LocalState[p, s],
     messages: Set[m],
     events: Set[e],
     extensions: ext
@@ -36,7 +38,7 @@ module glyph {
 
   // This is the message routing to the # handler
   type Listener[p, s, m, e, ce, ext] =
-    (LocalState[p, s], LocalContext[m, e, ext]) => Set[Transition[p, s, m, ce]]
+    (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, ce]]
 
   type EffectProcessor[p, s, m, e, ce, ext] =
     (GlobalContext[p, s, m, e, ext], ce) => GlobalContext[p, s, m, e, ext]
@@ -86,8 +88,9 @@ module glyph {
     env: GlobalContext[p, s, m, e, ext],
     v: p,
     local_to_global_extensions: ExtensionsConverter[p, ext, local_ext]
-  ): LocalContext[m, e, local_ext] = {
+  ): LocalContext[p, s, m, e, local_ext] = {
     {
+      state: env.system.get(v),
       messages: env.messages.get(v),
       events: env.events.get(v),
       extensions: local_to_global_extensions(env.extensions, v)
@@ -109,8 +112,7 @@ module glyph {
   ): bool = all {
     nondet v = oneOf(processes)
     val input = convert_context(s, v, local_to_global_extensions)
-    val ls = s.system.get(v)
-    val transitions = listener(ls, input).filter(t => t.effects.size() > 0 or t.post_state != ls)
+    val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     all {
       transitions.size() > 0,
       nondet transition = oneOf(transitions)

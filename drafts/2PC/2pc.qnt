@@ -26,7 +26,7 @@ module two_phase_commit {
 
   /* Boilerplate */
   type LocalState = glyph::LocalState[Node, StateFields]
-  type LocalContext = glyph::LocalContext[Message, Event, Extensions]
+  type LocalContext = glyph::LocalContext[Node, StateFields, Message, Event, Extensions]
   type Transition = glyph::Transition[Node, StateFields, Message, CustomEffects]
   type GlobalContext = glyph::GlobalContext[
     Node,
@@ -45,91 +45,85 @@ module two_phase_commit {
   }
 
   // --- Participant transitions ----------------------------------------------
-  pure def spontaneously_prepares(s: LocalState, msgs: Set[Message]): Set[Transition] = {
-    if (not(s.role == Participant and s.stage == Working)) {
+  pure def spontaneously_prepares(ctx: LocalContext): Set[Transition] = {
+    if (not(ctx.state.role == Participant and ctx.state.stage == Working)) {
       Set()
     } else {
       Set({
-        effects: Set(glyph::Broadcast(ParticipantPrepared(s.process_id))),
-        post_state: { ...s, stage: Prepared }
+        effects: Set(glyph::Broadcast(ParticipantPrepared(ctx.state.process_id))),
+        post_state: { ...ctx.state, stage: Prepared }
       })
     }
   }
 
-  pure def spontaneously_aborts(s: LocalState, msgs: Set[Message]): Set[Transition] = {
-    if (not(s.role == Participant and s.stage == Working)) {
+  pure def spontaneously_aborts(ctx: LocalContext): Set[Transition] = {
+    if (not(ctx.state.role == Participant and ctx.state.stage == Working)) {
       Set()
     } else {
       Set({
         effects: Set(),
-        post_state: { ...s, stage: Aborted }
+        post_state: { ...ctx.state, stage: Aborted }
       })
     }
   }
 
-  pure def aborts_as_instructed(s: LocalState, msgs: Set[Message]): Set[Transition] = {
-    if (not(s.role == Participant and msgs.contains(CoordinatorAbort))) {
+  pure def aborts_as_instructed(ctx: LocalContext): Set[Transition] = {
+    if (not(ctx.state.role == Participant and ctx.messages.contains(CoordinatorAbort))) {
       Set()
     } else {
       Set({
         effects: Set(),
-        post_state: { ...s, stage: Aborted }
+        post_state: { ...ctx.state, stage: Aborted }
       })
     }
   }
 
-  pure def commits_as_instructed(s: LocalState, msgs: Set[Message]): Set[Transition] = {
-    if (not(s.role == Participant and msgs.contains(CoordinatorCommit))) {
+  pure def commits_as_instructed(ctx: LocalContext): Set[Transition] = {
+    if (not(ctx.state.role == Participant and ctx.messages.contains(CoordinatorCommit))) {
       Set()
     } else {
       Set({
         effects: Set(),
-        post_state: { ...s, stage: Committed }
+        post_state: { ...ctx.state, stage: Committed }
       })
     }
   }
 
   // --- Coordinator transitions ------------------------------
-  pure def decides_on_commit(
-    s: LocalState,
-    msgs: Set[Message]
-  ): Set[Transition] = {
+  pure def decides_on_commit(ctx: LocalContext): Set[Transition] = {
     if (not(
-      s.role == Coordinator
-        and s.stage == Working
-        and msgs.get_prepared_msgs().size() == PARTICIPANTS.size()
+      ctx.state.role == Coordinator
+        and ctx.state.stage == Working
+        and ctx.messages.get_prepared_msgs().size() == PARTICIPANTS.size()
     )) {
       Set()
     } else {
       Set({
         effects: Set(glyph::Broadcast(CoordinatorCommit)),
-        post_state: { ...s, stage: Committed }
+        post_state: { ...ctx.state, stage: Committed }
       })
     }
   }
 
-  pure def decides_on_abort(
-    s: LocalState,
-    msgs: Set[Message]
-  ): Set[Transition] = {
-    if (not(s.role == Coordinator and s.stage == Working)) {
+  pure def decides_on_abort(ctx: LocalContext): Set[Transition] = {
+    if (not(ctx.state.role == Coordinator and ctx.state.stage == Working)) {
       Set()
     } else {
       Set({
         effects: Set(glyph::Broadcast(CoordinatorAbort)),
-        post_state: { ...s, stage: Aborted }
+        post_state: { ...ctx.state, stage: Aborted }
       })
     }
   }
 
-  pure def main_listener(s: LocalState, c: LocalContext): Set[Transition] = {
+  pure def main_listener(input: LocalContext): Set[Transition] = {
     Set(
-      spontaneously_prepares(s, c.messages),
-      spontaneously_aborts(s, c.messages),
-      aborts_as_instructed(s, c.messages),
-      commits_as_instructed(s, c.messages),
-      decides_on_commit(s, c.messages),
-      decides_on_abort(s, c.messages)
+      spontaneously_prepares(input),
+      spontaneously_aborts(input),
+      aborts_as_instructed(input),
+      commits_as_instructed(input),
+      decides_on_commit(input),
+      decides_on_abort(input)
     ).flatten()
   }
 
@@ -171,4 +165,7 @@ module two_phase_commit {
   })
 
   val wit_commit = PARTICIPANTS.exists(p => glyph::s.system.get(p).stage != Committed)
+
+  // run commitment = init
+  //   .then()
 }
