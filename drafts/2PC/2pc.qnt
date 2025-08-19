@@ -152,7 +152,6 @@ module two_phase_commit {
     main_listener,
     (c, _) => c,
     (e, p) => e, // env to local context,
-    Set() // more byzantines
   )
 
   // Invariants and witnesses
@@ -166,6 +165,21 @@ module two_phase_commit {
 
   val wit_commit = PARTICIPANTS.exists(p => glyph::s.system.get(p).stage != Committed)
 
-  // run commitment = init
-  //   .then()
+  action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
+    glyph::step_with(v, listener, (c, _) => c, (e, p) => e)
+
+  run commitTest = init
+    .then(step_with("p1", spontaneously_prepares))
+    .then(step_with("p2", spontaneously_prepares))
+    .then(step_with("p3", spontaneously_prepares))
+    .then(step_with(COORDINATOR, decides_on_commit))
+    .then(step_with("p1", commits_as_instructed))
+    .then(step_with("p2", commits_as_instructed))
+    .then(step_with("p3", commits_as_instructed))
+    .expect({
+      // Check that all participants have committed
+      PARTICIPANTS.forall(p => {
+        glyph::s.system.get(p).stage == Committed
+      })
+    })
 }
