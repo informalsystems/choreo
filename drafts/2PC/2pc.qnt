@@ -4,12 +4,12 @@ module two_phase_commit {
   import basicSpells.* from "../../ux/set-based/lib/basicSpells"
   import glyph(processes = NODES) as glyph from "../../ux/set-based/lib/glyph"
 
-  // --- Types ----------------------------------------------------------------
-  type Node = str
+  // Auxiliary types
   type Role = Coordinator | Participant
-
   type Stage = Working | Prepared | Committed | Aborted
 
+  // Mandatory types for the Glyph
+  type Node = str
   type Message =
     | CoordinatorAbort
     | CoordinatorCommit
@@ -94,7 +94,11 @@ module two_phase_commit {
     s: LocalState,
     msgs: Set[Message]
   ): Set[Transition] = {
-    if (not(s.role == Coordinator and s.stage == Working and msgs.get_prepared_msgs().size() == PARTICIPANTS.size())) {
+    if (not(
+      s.role == Coordinator
+        and s.stage == Working
+        and msgs.get_prepared_msgs().size() == PARTICIPANTS.size()
+    )) {
       Set()
     } else {
       Set({
@@ -118,10 +122,7 @@ module two_phase_commit {
     }
   }
 
-  pure def main_listener(
-    s: LocalState,
-    c: LocalContext
-  ): Set[Transition] = {
+  pure def main_listener(s: LocalState, c: LocalContext): Set[Transition] = {
     Set(
       spontaneously_prepares(s, c.messages),
       spontaneously_aborts(s, c.messages),
@@ -132,18 +133,19 @@ module two_phase_commit {
     ).flatten()
   }
 
-  val COORDINATOR: Node = "c"
-  val PARTICIPANTS: Set[Node] = Set("p1", "p2", "p3")
+  pure val COORDINATOR: Node = "c"
+  pure val PARTICIPANTS: Set[Node] = Set("p1", "p2", "p3")
   pure val NODES = PARTICIPANTS.union(Set(COORDINATOR))
 
-  def initialize(n: Node): LocalState = {
-    val role = if (n == COORDINATOR) Coordinator else Participant
+  pure def initialize(n: Node): LocalState = {
     {
       process_id: n,
-      role: role,
+      role: if (n == COORDINATOR) Coordinator else Participant,
       stage: Working,
     }
   }
+
+  // Setting up the state machine
 
   action init = glyph::init({
     system: NODES.mapBy(n => initialize(n)),
@@ -158,6 +160,8 @@ module two_phase_commit {
     (e, p) => e, // env to local context,
     Set() // more byzantines
   )
+
+  // Invariants and witnesses
 
   val consistency = PARTICIPANTS.forall(p1 => {
     PARTICIPANTS.forall(p2 => {
