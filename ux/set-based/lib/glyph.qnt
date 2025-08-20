@@ -151,4 +151,54 @@ module glyph {
     },
   }
 
+  action step_with_filter(
+    v: p,
+    listener: Listener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    f: (Transition[p, s, m, e, ce]) => bool,
+    // displayer: Displayer[p, s, m, te, l, extensions, d],
+  ): bool = all {
+    val input = convert_context(s, v, local_to_global_extensions)
+    val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state).filter(f)
+    all {
+      transitions.size() > 0,
+      // FIXME: Quint was supposed to detect determinism alone
+      if (transitions.size() == 1) {
+        val transition = transitions.getOnlyElement()
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      } else {
+        nondet transition = oneOf(transitions)
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      }
+    },
+  }
+
+  action step_with_messages(
+    v: p,
+    listener: Listener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    f: Set[m] => Set[m],
+    // displayer: Displayer[p, s, m, te, l, extensions, d],
+  ): bool = all {
+    val input = convert_context(s, v, local_to_global_extensions)
+    val input1 = { ...input, messages: f(input.messages) }
+    val transitions = listener(input1).filter(t => t.effects.size() > 0 or t.post_state != input.state)
+    all {
+      transitions.size() > 0,
+      // FIXME: Quint was supposed to detect determinism alone
+      if (transitions.size() == 1) {
+        val transition = transitions.getOnlyElement()
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      } else {
+        nondet transition = oneOf(transitions)
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      }
+    },
+  }
 }
