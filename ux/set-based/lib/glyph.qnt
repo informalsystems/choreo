@@ -112,7 +112,7 @@ module glyph {
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
     // displayer: Displayer[p, s, m, te, l, extensions, d],
-  ): bool = all {
+  ): bool = {
     nondet v = oneOf(processes)
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
@@ -124,7 +124,7 @@ module glyph {
         s' = post_env,
         // display' = displayer(post_env)
       }
-    },
+    }
   }
 
   action step_with(
@@ -133,7 +133,7 @@ module glyph {
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
     // displayer: Displayer[p, s, m, te, l, extensions, d],
-  ): bool = all {
+  ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     all {
@@ -148,7 +148,7 @@ module glyph {
         val post_env = apply_effect(s, v, transition, apply_custom_effect)
         s' = post_env
       }
-    },
+    }
   }
 
   action step_with_filter(
@@ -158,7 +158,7 @@ module glyph {
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
     f: (Transition[p, s, m, e, ce]) => bool,
     // displayer: Displayer[p, s, m, te, l, extensions, d],
-  ): bool = all {
+  ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state).filter(f)
     all {
@@ -173,7 +173,7 @@ module glyph {
         val post_env = apply_effect(s, v, transition, apply_custom_effect)
         s' = post_env
       }
-    },
+    }
   }
 
   action step_with_messages(
@@ -183,7 +183,7 @@ module glyph {
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
     f: Set[m] => Set[m],
     // displayer: Displayer[p, s, m, te, l, extensions, d],
-  ): bool = all {
+  ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val input1 = { ...input, messages: f(input.messages) }
     val transitions = listener(input1).filter(t => t.effects.size() > 0 or t.post_state != input.state)
@@ -199,6 +199,14 @@ module glyph {
         val post_env = apply_effect(s, v, transition, apply_custom_effect)
         s' = post_env
       }
-    },
+    }
+  }
+
+  action lose_messages(v: p, f: Set[m] => Set[m]): bool = {
+    val msgs = s.messages.get(v)
+    val new_msgs = msgs.exclude(f(msgs))
+    all {
+      s' = { ...s, messages: s.messages.set(v, new_msgs) }
+    }
   }
 }

@@ -652,6 +652,8 @@ module tendermint {
     f: Set[Message] => Set[Message]
   ): bool =
     glyph::step_with_messages(v, listener, (c, _) => c, (e, p) => e, f)
+
+  action lose_messages = glyph::lose_messages
 }
 
 module valid {
@@ -679,39 +681,38 @@ module no_agreement {
   ).*
 
   run disagreementTest = init
-    // Explicit partitioning - filtering the set of messages
-    // - it would be good to have assertions over the filtered set of messages
-    //   - maybe something similar to the displayer
-    .then(step_with_messages(
-      // p1 reacts to the byzantine proposal for v0
-      "p1",
-      upon_proposal_in_propose,
-      _ => Set(Propose({ proposal: "v0", round: 0, src: "p3", valid_round: -1 }))
-    )).then(step_with_messages(
-      // p2 reacts to the byzantine proposal for v1
-      "p2",
-      upon_proposal_in_propose,
-      _ => Set(Propose({ proposal: "v1", round: 0, src: "p3", valid_round: -1 }))
-    )).then(step_with_messages(
-      // p1 doesn't see the prevote from p2, but there are enough prevotes without it
-      "p1",
-      upon_quorum_prevotes_any,
-      ms => ms.filter(m => m.source() != "p2")
+    // There are several byzantine proposals. Lose the ones we don't want to consume
+    .then("p1".lose_messages(
+      ms => ms.get_proposals().filter(p => p.proposal != "v0").map(p => Propose(p))
     ))
-    .then(step_with_messages(
-      // p2 doesn't see the prevote from p1, but there are enough prevotes without it
-      "p2",
-      upon_quorum_prevotes_any,
-      ms => ms.filter(m => m.source() != "p1")
-    )).then(step_with_messages(
-      "p1",
-      upon_quorum_precommits_any,
-      ms => ms.filter(m => m.source() != "p2")
-    )).then(step_with_messages(
-      "p2",
-      upon_quorum_precommits_any,
-      ms => ms.filter(m => m.source() != "p1")
+    .then("p2".lose_messages(
+      ms => ms.get_proposals().filter(p => p.proposal != "v1").map(p => Propose(p))
     ))
+
+    // p1 reacts to the byzantine proposal for v0
+    .then(step_with("p1", upon_proposal_in_propose))
+    // p2 reacts to the byzantine proposal for v1
+    .then(step_with("p2", upon_proposal_in_propose))
+
+    // Partitioning: p1 and p2 lose each other's messages
+    .then("p1".lose_messages(ms => ms.filter(m => m.source() == "p2")))
+    .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
+
+    // p1 doesn't see the prevote from p2, but there are enough prevotes without it
+    .then(step_with("p1", upon_quorum_prevotes_any))
+    // p2 doesn't see the prevote from p1, but there are enough prevotes without it
+    .then(step_with("p2", upon_quorum_prevotes_any))
+
+    // Partitioning: p1 and p2 lose each other's messages
+    .then("p1".lose_messages(ms => ms.filter(m => m.source() == "p2")))
+    .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
+
+    // p1 doesn't see the precommit from p2, but there are enough precommits without it
+    .then(step_with("p1", upon_quorum_precommits_any))
+    // p2 doesn't see the precommit from p1, but there are enough precommits without it
+    .then(step_with("p2", upon_quorum_precommits_any))
+
+    // Now we just take the final steps towards decision
     .then(step_with("p1", upon_proposal_in_prevote_commit))
     .then(step_with("p2", upon_proposal_in_prevote_commit))
     .then(step_with("p1", upon_proposal_in_precommit_no_decision))
