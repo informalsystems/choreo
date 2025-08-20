@@ -107,42 +107,34 @@ module tendermint {
 
   pure def id(v: Value): ValueId = { hashed: v }
 
-  // TODO: Update start_round function to work with glyph library
-  /*
-  pure def start_round(
-      s: LocalState,
-      round: Round
-  ): ListenerOutput =
-      val s1 = {
-          ...s,
-          stage: ProposeStage,
-          precommit_quorum: false,
+
+  pure def start_round(input: LocalContext, round: Round): Transition = {
+    val s = input.state
+
+    pure val effect =
+      if (s.process_id == PROPOSER.get(round)) {
+        pure val proposal =
+          if (s.valid_value != None)
+            s.valid_value.unwrap()
+          else
+            VALUES.get(round)
+
+        glyph::Broadcast(
+          Propose({ src: s.process_id, round: round, proposal: proposal, valid_round: s.valid_round })
+        )
+      } else {
+        glyph::TriggerEvent({ kind: ProposeTimeout, round: s.round })
       }
-
-      pure val output =
-          if (s.process_id == PROPOSER.get(round)) {
-          pure val proposal =
-              if (s.valid_value != None)
-                  s.valid_value.unwrap()
-              else
-                  VALUES.get(round)
-
-          Set(
-              Ext(
-                  Broadcast(
-                      Propose({ src: s.process_id, round: s.round, proposal: proposal, valid_round: s.valid_round })
-                  )
-              )
-          )
-          } else {
-
-              Set(Inter(StartTimeout({ kind: ProposeTimeout, round: s.round })))
-          }
-      {
-          effects: output,
-          state: s1
+    {
+      effects: Set(effect),
+      post_state: {
+        ...s,
+        round: round,
+        stage: ProposeStage,
+        precommit_quorum: false,
       }
-  */
+    }
+  }
 
   pure def upon_proposal_in_propose(input: LocalContext): Set[Transition] = {
     val s = input.state
@@ -187,7 +179,7 @@ module tendermint {
     val messages = input.messages
 
     val state_guard = and {
-      s.stage == PreVoteStage,
+      s.stage == ProposeStage,
     }
 
     def message_guard = (p) => and {
@@ -216,7 +208,7 @@ module tendermint {
     }
 
     enabled_proposals.map(p => {
-      post_state: { ...s, stage: PreVoteStage},
+      post_state: { ...s, stage: PreVoteStage },
       effects: effect_builder(p)
     })
   }
@@ -438,24 +430,22 @@ module tendermint {
       else
           Set()
   }
-
-  pure def on_precommit_timeout(
-      s: LocalState,
-      t: Set[TimeoutEvent]
-  ): Set[ListenerOutput] = {
-      val candidates = t.filter(t => t.round >= s.round and t.kind == PreCommitTimeout)
-      val guard = and {
-          candidates.size() > 0,
-          s.stage == PreCommitStage,
-      }
-      if (guard)
-          Set(
-              start_round(s, s.round + 1)
-          )
-      else
-          Set()
-  }
   */
+
+  pure def on_precommit_timeout(input: LocalContext): Set[Transition] = {
+    val s = input.state
+
+    val candidates = input.events.filter(t => t.round >= s.round and t.kind == PreCommitTimeout)
+    val guard = and {
+      candidates.size() > 0,
+      s.stage == PreCommitStage,
+    }
+
+    if (guard)
+      Set(start_round(input, s.round + 1))
+    else
+      Set()
+  }
 
   pure def main_listener(input: LocalContext): Set[Transition] =
     Set(
@@ -468,7 +458,7 @@ module tendermint {
       upon_quorum_precommits_any(input),
       //on_propose_timeout(input),
       //on_prevote_timeout(input),
-      //on_precommit_timeout(input)
+      on_precommit_timeout(input)
     ).flatten()
 
   pure val initial_message =
@@ -654,9 +644,13 @@ module tendermint {
     glyph::step_with_messages(v, listener, (c, _) => c, (e, p) => e, f)
 
   action lose_messages = glyph::lose_messages
+
+  val s = glyph::s
 }
 
 module valid {
+  import basicSpells.* from "../../ux/set-based/lib/basicSpells"
+
   import tendermint(
     F = 1,
     CORRECT = Set("p1","p2", "p3"),
@@ -665,11 +659,33 @@ module valid {
     VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
     MAX_ROUND = 4
   ).*
+
+  run line28Test = init
+    .then(step_with("p1", upon_proposal_in_propose))
+    .then(step_with("p2", upon_proposal_in_propose))
+    .then(step_with("p1", upon_quorum_prevotes_any))
+    .then(step_with("p2", upon_quorum_prevotes_any))
+
+    .then(step_with("p2", upon_quorum_precommits_any))
+    .then(step_with("p2", upon_proposal_in_prevote_commit))
+    .then(step_with("p2", on_precommit_timeout))
+    // p2 starts a new round
+    .expect(s.system.get("p2").round == 1)
+
+    // since p2 is the proposer in the new round, it will propose the stored valid value
+    .expect(and {
+      s.system.get("p2").stage == ProposeStage,
+      s.messages.values().forall(ms => {
+        ms.contains(Propose({ src: "p2", round: 1, proposal: "v0", valid_round: 0 }))
+      })
+    })
+
+    // Which enables line 28 to be called by p2, as it is in propose stage and can receive
+    // the new proposal with valid_round 0.
+    .then(step_with("p2", upon_proposal_in_propose_prevote))
 }
 
 module no_agreement {
-  import basicSpells.* from "../../ux/set-based/lib/basicSpells"
-
   import tendermint(
     F = 1,
     CORRECT = Set("p1", "p2"),
