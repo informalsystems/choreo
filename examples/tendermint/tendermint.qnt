@@ -259,7 +259,7 @@ module tendermint {
     if (quorum and state_guard) {
       // If we have a quorum, we can move to precommit stage
       val outputs = Set({
-        post_state: { ...s, stage: PreCommitStage},
+        post_state: { ...s, stage: PreCommitStage },
         effects: Set(glyph::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
       })
       outputs
@@ -268,33 +268,26 @@ module tendermint {
     }
   }
 
-  // TODO: Update to work with glyph library
-  /*
-  pure def upon_quorum_precommits_any(
-      s: LocalState,
-      messages: Set[Message]
-  ): Set[ListenerOutput] = {
+  pure def upon_quorum_precommits_any(input: LocalContext): Set[Transition] = {
+    val s = input.state
+    val messages = input.messages
 
+    // Do we have a quorum of PreCommits in the current round
+    def message_guard = (pc) => (pc.round == s.round)
+    val quorum = messages.get_pre_commits().filter(pc => and {
+      message_guard(pc),
+    }).size() >= 2 * F + 1 // quorum size is F + 1
 
-      // Do we have a quorum of PreCommits in the current round
-      def message_guard = (pc) => (pc.round == s.round)
-      val quorum = messages.get_pre_commits().filter(pc => and {
-          message_guard(pc),
-      }).size() >= 2 * F + 1 // quorum size is F + 1
-
-      if (quorum) {
-          // If we have a quorum, we can move to decided stage
-          val outputs = Set({
-              state: s,
-              effects: Set(Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round })))
-          }
-          )
-          outputs
-      } else {
-          Set()
-      }
+    if (quorum) {
+      // If we have a quorum, we can move to decided stage
+      Set({
+        post_state: s,
+        effects: Set(glyph::TriggerEvent({ kind: PreCommitTimeout, round: s.round }))
+      })
+    } else {
+      Set()
+    }
   }
-  */
 
   pure def upon_proposal_in_prevote_commit(input: LocalContext): Set[Transition] = {
     val s = input.state
@@ -472,7 +465,7 @@ module tendermint {
       upon_proposal_in_prevote_commit(input),
       upon_quorum_prevotes_any(input),
       upon_quorum_nil_prevotes(input),
-      //upon_quorum_precommits_any(input),
+      upon_quorum_precommits_any(input),
       //on_propose_timeout(input),
       //on_prevote_timeout(input),
       //on_precommit_timeout(input)
@@ -710,7 +703,18 @@ module no_agreement {
       "p2",
       upon_quorum_prevotes_any,
       ms => ms.filter(m => m.source() != "p1")
+    )).then(step_with_messages(
+      "p1",
+      upon_quorum_precommits_any,
+      ms => ms.filter(m => m.source() != "p2")
+    )).then(step_with_messages(
+      "p2",
+      upon_quorum_precommits_any,
+      ms => ms.filter(m => m.source() != "p1")
     ))
-    // .then(step_with("p1", upon_quorum_precommits_any))
-    // .then(step_with("p2", upon_quorum_precommits_any))
+    .then(step_with("p1", upon_proposal_in_prevote_commit))
+    .then(step_with("p2", upon_proposal_in_prevote_commit))
+    .then(step_with("p1", upon_proposal_in_precommit_no_decision))
+    .then(step_with("p2", upon_proposal_in_precommit_no_decision))
+    .expect(not(agreement))
 }
