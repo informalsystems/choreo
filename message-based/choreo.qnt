@@ -1,14 +1,14 @@
 // -*- mode: Bluespec; -*-
 
 /**
- * Quint Glyphs, a library for delightful specifications
+ * Quint Choreos, a library for delightful specifications
  * of distributed systems.
  *
  * Gabriela Moreira, Josef Widder and Yassine Boukhari,
  * Informal Systems, 2025
  */
 
-module glyphsBase {
+module choreosBase {
   import basicSpells.* from "../spells/basicSpells"
 
   type LocalState[process_id, message, other_fields] = {
@@ -40,9 +40,9 @@ module glyphsBase {
 
 }
 
-module glyphNetwork {
+module choreoNetwork {
   import basicSpells.* from "../spells/basicSpells"
-  import glyphsBase.*
+  import choreosBase.*
 
   pure def broadcast(
     env: GlobalState[p, s, m, b],
@@ -65,9 +65,9 @@ module glyphNetwork {
 
 }
 
-module glyphDriver {
+module choreoDriver {
   import basicSpells.* from "../spells/basicSpells"
-  import glyphsBase.*
+  import choreosBase.*
 
   const processes: Set[p]
   var s: GlobalState[p, s, m, b]

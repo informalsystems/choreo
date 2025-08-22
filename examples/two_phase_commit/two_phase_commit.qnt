@@ -2,13 +2,13 @@
 
 module two_phase_commit {
   import basicSpells.* from "../../spells/basicSpells"
-  import glyph(processes = NODES) as glyph from "../../set-based/glyph"
+  import choreo(processes = NODES) as choreo from "../../set-based/choreo"
 
   // Auxiliary types
   type Role = Coordinator | Participant
   type Stage = Working | Prepared | Committed | Aborted
 
-  // Mandatory types for the Glyph
+  // Mandatory types for the Choreo
   type Node = str
   type Message =
     | CoordinatorAbort
@@ -25,10 +25,10 @@ module two_phase_commit {
   type Extensions = ()
 
   /* Boilerplate */
-  type LocalState = glyph::LocalState[Node, StateFields]
-  type LocalContext = glyph::LocalContext[Node, StateFields, Message, Event, Extensions]
-  type Transition = glyph::Transition[Node, StateFields, Message, Event, CustomEffects]
-  type GlobalContext = glyph::GlobalContext[
+  type LocalState = choreo::LocalState[Node, StateFields]
+  type LocalContext = choreo::LocalContext[Node, StateFields, Message, Event, Extensions]
+  type Transition = choreo::Transition[Node, StateFields, Message, Event, CustomEffects]
+  type GlobalContext = choreo::GlobalContext[
     Node,
     StateFields,
     Message,
@@ -50,7 +50,7 @@ module two_phase_commit {
       Set()
     } else {
       Set({
-        effects: Set(glyph::Broadcast(ParticipantPrepared(ctx.state.process_id))),
+        effects: Set(choreo::Broadcast(ParticipantPrepared(ctx.state.process_id))),
         post_state: { ...ctx.state, stage: Prepared }
       })
     }
@@ -99,7 +99,7 @@ module two_phase_commit {
       Set()
     } else {
       Set({
-        effects: Set(glyph::Broadcast(CoordinatorCommit)),
+        effects: Set(choreo::Broadcast(CoordinatorCommit)),
         post_state: { ...ctx.state, stage: Committed }
       })
     }
@@ -110,7 +110,7 @@ module two_phase_commit {
       Set()
     } else {
       Set({
-        effects: Set(glyph::Broadcast(CoordinatorAbort)),
+        effects: Set(choreo::Broadcast(CoordinatorAbort)),
         post_state: { ...ctx.state, stage: Aborted }
       })
     }
@@ -141,14 +141,14 @@ module two_phase_commit {
 
   // Setting up the state machine
 
-  action init = glyph::init({
+  action init = choreo::init({
     system: NODES.mapBy(n => initialize(n)),
     messages: NODES.mapBy(n => Set()),
     events: NODES.mapBy(n => Set()),
     extensions: ()
   })
 
-  action step = glyph::step(
+  action step = choreo::step(
     main_listener,
     (c, _) => c,
     (e, p) => e, // env to local context,
@@ -158,15 +158,15 @@ module two_phase_commit {
 
   val consistency = PARTICIPANTS.forall(p1 => {
     PARTICIPANTS.forall(p2 => {
-      not(glyph::s.system.get(p1).stage == Committed
-        and glyph::s.system.get(p2).stage == Aborted)
+      not(choreo::s.system.get(p1).stage == Committed
+        and choreo::s.system.get(p2).stage == Aborted)
     })
   })
 
-  val wit_commit = PARTICIPANTS.exists(p => glyph::s.system.get(p).stage != Committed)
+  val wit_commit = PARTICIPANTS.exists(p => choreo::s.system.get(p).stage != Committed)
 
   action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
-    glyph::step_with(v, listener, (c, _) => c, (e, p) => e)
+    choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
 
   run commitTest = init
     .then(step_with("p1", spontaneously_prepares))
@@ -179,7 +179,7 @@ module two_phase_commit {
     .expect({
       // Check that all participants have committed
       PARTICIPANTS.forall(p => {
-        glyph::s.system.get(p).stage == Committed
+        choreo::s.system.get(p).stage == Committed
       })
     })
 }
