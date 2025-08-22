@@ -1,9 +1,9 @@
 // -*- mode: Bluespec; -*-
 
 module monadbft{
-    import basicSpells.* from "lib/basicSpells"
-    import rareSpells.* from "lib/rareSpells"
-    import csmi(processes = validators) as csmi from "csmi"
+    import basicSpells.* from "../../spells/basicSpells"
+    import rareSpells.* from "../../spells/rareSpells"
+    import choreo(processes = validators) as choreo from "../../choreo"
      
     
     /// Set of validators participating in the consensus.
@@ -23,7 +23,7 @@ module monadbft{
         | Timeout(TimeoutMsg)
         | NoEndorsement(NoEndorsementMsg)
 
-    type Effects =
+    type CustomEffects =
         | BroadcastProp(Proposal)
         | BroadCastTimeout(TimeoutMsg)
         | Commit(Proposal)
@@ -39,61 +39,60 @@ module monadbft{
         timeoutHistory: Set[TimeoutData],
     }
 
-    // Define types for the parameterized CSMI types with the proper type arguments
+    // Define types for the parameterized choreo types with the proper type arguments
     // for MonadBFT
-    type LocalState = csmi::LocalState[Address, State]
-    type Transition = csmi::Transition[LocalState, Effects]
-
+    
     type EnvExtensions = {
         proposals_mock: Set[Proposal],
         ancestors_mock: ProposalID -> Set[ProposalID],
+        logging: Logging,
     }
 
-    type Environment = csmi::Environment[
+    /* Boilerplate */
+    type LocalState = choreo::LocalState[Address, State]
+    type LocalContext = choreo::LocalContext[Address, State, Message, InternalEvent, EnvExtensions]
+    type Transition = choreo::Transition[Address, State, Message, InternalEvent, CustomEffects]
+    type GlobalContext = choreo::GlobalContext[
         Address,
         State,
         Message,
         InternalEvent,
-        Logging,
         EnvExtensions
     ]
-    
-    type LocalContext = csmi::LocalContextF[Message, InternalEvent, EnvExtensions]
-    pure def env_to_context(
-        env: Environment, 
-        process_id: Address,
-        eve: csmi::Event[Message, InternalEvent]
-    ): LocalContext = 
-        {
-            event: eve,
-            proposals_mock: env.extensions.proposals_mock,
-            ancestors_mock: env.extensions.ancestors_mock,
-        }
+    /* End of boilerplate */
     
     //
     // Some utilities to handle state accumulation
     //
     pure def nop(s: LocalState): Transition = {
-        { postState: s, effects: Set() }
+        { post_state: s, effects: Set() }
     }
 
     pure def join_results(
         t1: Transition,
         t2: Transition
     ): Transition = {
-        { postState: t2.postState, effects: t1.effects.union(t2.effects) }
+        { post_state: t2.post_state, effects: t1.effects.union(t2.effects) }
     }
 
     pure def and_then(
         t: Transition,
         f: LocalState => Transition
     ): Transition = 
-        join_results(t, f(t.postState))
+        join_results(t, f(t.post_state))
 
     pure def and_then_state(
         state: LocalState,
         f: LocalState => r
     ): r = f(state)
+    
+    pure def groupBy(s: Set[a], keyFunc: a => k): k -> Set[a] = {
+        s.fold(Map(), (acc, elem) => {
+            val key = keyFunc(elem)
+            val existing = acc.getOrElse(key, Set())
+            acc.put(key, existing.setAdd(elem))
+        })
+    }
     
     /// Number of votes needed to reach consensus
     pure val Q = 2 * F + 1
@@ -550,10 +549,10 @@ module monadbft{
     pure def increment_view(view: int, s: LocalState): Transition = {
         if (view >= s.curView)
         // Increment view to next and reset the timer, old timers are discarded at apply_effect
-        { postState: { ...s, curView: view + 1 }, effects: Set(StartTimeout(view + 1)) }
+        { post_state: { ...s, curView: view + 1 }, effects: Set(choreo::CustomEffect(StartTimeout(view + 1))) }
         else
         // If we are already in a higher view, we do not change the state.
-        { postState: s, effects: Set() }
+        { post_state: s, effects: Set() }
     }
 
 
@@ -571,8 +570,8 @@ module monadbft{
         }
 
         {
-            postState: { ...s, highest_voted_view: max(s.highest_voted_view, s.curView) },
-            effects: Set(BroadCastTimeout(timeout_msg))
+            post_state: { ...s, highest_voted_view: max(s.highest_voted_view, s.curView) },
+            effects: Set(choreo::CustomEffect(BroadCastTimeout(timeout_msg)))
         }
     }
 
@@ -612,13 +611,13 @@ module monadbft{
 
                 // Line 41
                 pure val commit = if (p.block.qc.view == parent_proposal.block.qc.view + 1)
-                    Set(Commit(grandparent_proposal), Confirmation(p))
+                    Set(choreo::CustomEffect(Commit(grandparent_proposal)), choreo::CustomEffect(Confirmation(p)))
                 else
                     Set()
 
                 // Line 43
                 pure val early_confirmation = if (p.view == p.block.qc.view + 1) // Warning: typo in the paper
-                    Set(EarlyConfirmation(parent_proposal))
+                    Set(choreo::CustomEffect(EarlyConfirmation(parent_proposal)))
                 else
                     Set()
 
@@ -644,10 +643,10 @@ module monadbft{
 
                 // TODO: send to next leader
                 pure val next_leader = leader_from_view(p.view + 1)
-                pure val send_vote = Set(SendVoteToNextLeader((next_leader, vote_msg)))
+                pure val send_vote = Set(choreo::CustomEffect(SendVoteToNextLeader((next_leader, vote_msg))))
 
                 {
-                    postState: { ...s, highest_voted_view: p.view, ledger: ledger, tip: update_tip(p) },
+                    post_state: { ...s, highest_voted_view: p.view, ledger: ledger, tip: update_tip(p) },
                     effects: commit.union(early_confirmation).union(send_vote)
                 }
             })
@@ -664,7 +663,7 @@ module monadbft{
         pure val res = increment_view(t.tip.block_header.qc.view, s)
         .and_then(s => increment_view(t.tip.view, s))
 
-        pure val res2 = res.postState.and_then_state(s => {
+        pure val res2 = res.post_state.and_then_state(s => {
         // Timeout is new, let's accumulate it
         val acc_timeouts = s.timeouts.getOrElse(v, Set()).setAdd(t)
         s.add_timeouts(v, acc_timeouts).and_then_state(s => {
@@ -717,12 +716,12 @@ module monadbft{
         pure val r = handle_vote(v, s)
         pure val qc = r._1
         pure val res = r._2
-        if (not(res.postState.i_am_leader())) nop(s) else
+        if (not(res.post_state.i_am_leader())) nop(s) else
             res.and_then(s => {
             if (qc == None) nop(s) else
             val new_block = build_block(qc.unwrap(), BLOCK_PAYLOAD)
             val p = build_proposal(s.curView, new_block, None, None, s.process_id)
-            { postState: s, effects: Set(BroadcastProp(p)) }
+            { post_state: s, effects: Set(choreo::CustomEffect(BroadcastProp(p))) }
             })
     }
 
@@ -749,13 +748,13 @@ module monadbft{
             // Line 17
             val block = get_present_block(prop_mock, high_tip.block_header)
             val p = build_proposal(s.curView, block, tc, None, s.process_id)
-                { postState: s, effects: Set(BroadcastProp(p)) }
+                { post_state: s, effects: Set(choreo::CustomEffect(BroadcastProp(p))) }
             } else
             // Line 18-19-20 recoveringcurView ← true; SendRecoveryRequest(curView, high tip, tc);
             // TODO: For the moment this is replaced by fetching the block from the DA variable for debugging purposes
             val block = get_present_block(prop_mock, high_tip.block_header)
             val p = build_proposal(s.curView, block, tc, None, s.process_id)
-                { postState: s, effects: Set(BroadcastProp(p)) }
+                { post_state: s, effects: Set(choreo::CustomEffect(BroadcastProp(p)) }
         })
         })
     }
@@ -766,56 +765,37 @@ module monadbft{
         proposal: Proposal,
         context: LocalContext
     ): Transition = {
-        val props_mock = context.proposals_mock
-        val ancestors_mock = context.ancestors_mock
+        val props_mock = context.extensions.proposals_mock
+        val ancestors_mock = context.extensions.ancestors_mock
         handle_proposal(ls, proposal, props_mock, ancestors_mock)
     }
 
 
     type Event = csmi::Event[Message, InternalEvent]
 
-    pure def handler(
-        ls: LocalState,
-        context: LocalContext
-    ): Transition =
-        val event = context.event
-        match event {
-            |Ext(msg) => 
-                match msg {
-                    | Prop(p) => upon_proposal_msg(ls, p, context)
-                    | Vote(v) => upon_vote_msg(ls, v)
-                    | Timeout(t) => upon_timeout_msg(ls, t, context.proposals_mock)
-                    | _ => nop(ls) // Ignore other external messages
-                }
-            |Inter(e) =>
-                match e {
-                    | TimeoutEvent(data) => trigger_timeout_event(ls)
-                    | _ => nop(ls) // Ignore other internal events
-                }
-        }
+    pure def main_listener(ctx: LocalContext): Set[Transition] = {
+        val messages = ctx.messages.map(msg => 
+            match msg {
+                | Prop(p) => upon_proposal_msg(ctx.state, p, ctx)
+                | Vote(v) => upon_vote_msg(ctx.state, v)
+                | Timeout(t) => upon_timeout_msg(ctx.state, t, ctx.extensions.proposals_mock)
+                | _ => nop(ctx.state) // Ignore other external messages
+            }
+        )
+        val events = ctx.events.map(e => 
+            match e {
+                | TimeoutEvent(data) => trigger_timeout_event(ctx.state)
+                | _ => nop(ctx.state) // Ignore other internal events
+            }
+        )
+        messages.union(events).filter(tr => tr.effects.size() > 0 or tr.post_state != ctx.state)
+    }
         
         
  
 
     // ------------------------------------------- Effect Application -------------------------------------------
     
-    pure def broadcast(
-        env: Environment,
-        msg: Message
-    ): Environment = {
-        {...env, 
-        msgBuffer: env.msgBuffer.transformValues(s => s.setAdd(msg))}
-    }
-
-    pure def send(
-        env: Environment,
-        v: Address,
-        msg: Message
-    ): Environment = 
-        {...env, 
-        msgBuffer: env.msgBuffer.setBy(v, s => s.setAdd(msg))}
-
-
     pure def update_ancestors(
         ext: EnvExtensions,
         p: Proposal
@@ -829,75 +809,65 @@ module monadbft{
         }
     }
 
-
-    pure def apply_effect(env: Environment, v: Address, tr: Transition): Environment = {
-        val effects = tr.effects
-        val p_state = tr.postState
-        // Update the local state
-        val env1 = {...env,
-            system: env.system.setBy(v, s => p_state),
-        }
-
-        effects.fold(env1, (e, x) => 
-            match x {
-                | BroadcastProp(p) => {
-                    // Abstraction: This was added to provide a data availability layer for the proposals to avoid having missing proposals.
-                    // and remove the need for a block recovery mechanism.
-                    // TODO: refractor this when we have a block recovery mechanism.
-                    val ext = e.extensions
-                    val log = e.logging
-                    val ext1 = {...ext, 
-                        proposals_mock: ext.proposals_mock.setAdd(p), 
-                    }
-                    val log1 = {...log,
-                        msgHistory: log.msgHistory.setAdd(Prop(p))
-                    }
-                    
-                    val e1 = { ...e,
-                        logging: log1,
-                        extensions: update_ancestors(ext1,p),                       
-                    }
-                    broadcast(e1, Prop(p))
+    pure def apply_custom_effect(env: GlobalContext, effect: CustomEffects): GlobalContext = {
+        match effect {
+            | BroadcastProp(p) => {
+                // Update logging and extensions, then broadcast
+                val ext = env.extensions
+                val log = ext.logging
+                val ext1 = {...ext, 
+                    proposals_mock: ext.proposals_mock.setAdd(p),
+                    logging: {...log, msgHistory: log.msgHistory.setAdd(Prop(p))},
                 }
-                    
-                | BroadCastTimeout(t) => 
-                    val log = e.logging
-                    val log1 = {...log,
-                        msgHistory: log.msgHistory.setAdd(Timeout(t))
-                    }
-                    val e1 = {...e, logging: log1}
-                    broadcast(e1, Timeout(t))
-    
-                | Commit(p) => 
-                    val log = e.logging
-                    val log1 = {...log,
-                        committed_proposals: log.committed_proposals.setBy(v, s => s.setAdd(p))
-                    }
-                    {...e, logging: log1}
-                | EarlyConfirmation(p) => e
-    
-                | Confirmation(p) => e
-    
-                | SendVoteToNextLeader(am) => 
-                    val log = e.logging
-                    val log1 = {...log,
-                        msgHistory: log.msgHistory.setAdd(Vote(am._2))
-                    }
-                    val e1 = {...e, logging: log1}
-                    send(e1,  am._1, Vote(am._2))
-    
-                | StartTimeout(t) => 
-                    // We want to have a single active timeout per process
-                    val buff = e.internalBuffer.getOrElse(v, Set())
-                    val timeouts = get_timeout_events(buff)
-                    if (timeouts == Set() or timeouts.getOnlyElement() < t)
-                        {...e, 
-                            internalBuffer: e.internalBuffer.setBy(v, s => Set(TimeoutEvent(t)))
-                        }
-                    else
-                        e // Do not overwrite an existing timeout event
+                // Apply the effect through choreo's broadcast mechanism
+                {...env,
+                    extensions: update_ancestors(ext1, p),
+                    messages: env.messages.transformValues(s => s.setAdd(Prop(p)))
+                }
             }
-        )
+            | BroadCastTimeout(t) => {
+                val ext = env.extensions
+                val log = ext.logging
+                val ext1 = {...ext,
+                    logging: {...log, msgHistory: log.msgHistory.setAdd(Timeout(t))}
+                }
+                {...env,
+                    extensions: ext1,
+                    messages: env.messages.transformValues(s => s.setAdd(Timeout(t)))
+                }
+            }
+            | Commit(p) => {
+                // Find the process that committed
+                val ext = env.extensions
+                val log = ext.logging
+                // We need to know which process committed, but that's not in the effect
+                // This is a limitation - for now, we'll just update extensions
+                val ext1 = {...ext,
+                    logging: {...log, 
+                        committed_proposals: log.committed_proposals.transformValues(s => s.setAdd(p))
+                    }
+                }
+                {...env, extensions: ext1}
+            }
+            | EarlyConfirmation(p) => env
+            | Confirmation(p) => env
+            | SendVoteToNextLeader(am) => {
+                val ext = env.extensions
+                val log = ext.logging
+                val ext1 = {...ext,
+                    logging: {...log, msgHistory: log.msgHistory.setAdd(Vote(am._2))}
+                }
+                {...env,
+                    extensions: ext1,
+                    messages: env.messages.setBy(am._1, s => s.setAdd(Vote(am._2)))
+                }
+            }
+            | StartTimeout(t) => {
+                // This should trigger an event - but we need to know which process
+                // For now, return unchanged - this needs to be handled differently
+                env
+            }
+        }
     }
     // ------------------------------------------- Initialization & Execution -------------------------------------------
     pure val sigs = range(0, 5).foldl(List(), (acc,v) => acc.append(leader_from_view(v)))
@@ -995,20 +965,21 @@ module monadbft{
         },
     }
 
-    action init = csmi::init(
-        initialize_process,
-        initialize_msg_buffer,
-        initialize_internal_buffer,
-        initial_env,
-        byz_messages
-    )
+    action init = choreo::init({
+        system: validators.mapBy(v => initialize_process(v)),
+        messages: validators.mapBy(v => initialize_msg_buffer(v)),
+        events: validators.mapBy(v => initialize_internal_buffer(v)),
+        extensions: {
+            proposals_mock: proposals_4,
+            ancestors_mock: ancestors_4,
+            logging: initial_logging,
+        }
+    })
 
-    action step = csmi::stepF(
-        handler,
-        apply_effect,
-        env_to_context,
-        displayer,
-        Set()
+    action step = choreo::step(
+        main_listener,
+        apply_custom_effect,
+        (e, p) => e
     )
 
     pure val byz_messages = {
@@ -1033,7 +1004,7 @@ module monadbft{
     // ------------------------------------------- Invariants and Witnesses -------------------------------------------
     /// Witness: Search for a scenario where a proposal gets reproposed.
     def reproposal =
-            val proposals = csmi::s.logging.msgHistory.fold(Set(), (s, x) => match x {
+            val proposals = choreo::s.extensions.logging.msgHistory.fold(Set(), (s, x) => match x {
                 | Prop(p) => s.setAdd(p)
                 | _ => s
             })
@@ -1044,11 +1015,11 @@ module monadbft{
 
     /// No Tail-Forking (NTF) page 10:
     def ntf =
-        val votes = csmi::s.logging.msgHistory.fold(Set(), (s, x) => match x {
+        val votes = choreo::s.extensions.logging.msgHistory.fold(Set(), (s, x) => match x {
             | Vote(v) => s.setAdd(v)
             | _ => s
         })
-        val committed_proposals = csmi::s.logging.committed_proposals.values().flatten()
+        val committed_proposals = choreo::s.extensions.logging.committed_proposals.values().flatten()
         votes.forall(v =>
             // If an honest leader’s proposal for sequence number s is voted upon by a majority of honest validators,
             // TODO: filter faulty proposer's proposals
@@ -1063,24 +1034,24 @@ module monadbft{
     /// Safety property page 10: No two correct validators commit different blocks
     /// for the same sequence number
     def safety =
-        val ps = csmi::s.logging.committed_proposals.values().flatten()
+        val ps = choreo::s.extensions.logging.committed_proposals.values().flatten()
         ps.forall(p1 => ps.forall(p2 => p1.block.seq == p2.block.seq implies p1 == p2))
 
     
     /// Witness: Search for a scenario where a proposal is committed with a TC.
     def commit_with_tc =
-        val ps = csmi::s.logging.committed_proposals.values().flatten()
+        val ps = choreo::s.extensions.logging.committed_proposals.values().flatten()
         ps.exists(p => p.tc != None)
         
 
 
     /// Witness: Search for a view where no one timed out.
     def no_timeouts =
-            val timeouts = csmi::s.logging.msgHistory.fold(Set(), (s, x) => match x {
+            val timeouts = choreo::s.extensions.logging.msgHistory.fold(Set(), (s, x) => match x {
                 | Timeout(t) => s.setAdd(t)
                 | _ => s
             })
-            val proposals = csmi::s.logging.msgHistory.fold(Set(), (s, x) => match x {
+            val proposals = choreo::s.extensions.logging.msgHistory.fold(Set(), (s, x) => match x {
                 | Prop(p) => s.setAdd(p)
                 | _ => s
             })
@@ -1091,11 +1062,11 @@ module monadbft{
 
     /// Witness: search for a QC that was not followed by a proposal referencing it.
     def missing_qc =
-        val votes = csmi::s.logging.msgHistory.filterMap(x => match x {
+        val votes = choreo::s.extensions.logging.msgHistory.filterMap(x => match x {
             | Vote(v) => Some(v)
             | _ => None
         })
-        val props = csmi::s.logging.msgHistory.filterMap(x => match x {
+        val props = choreo::s.extensions.logging.msgHistory.filterMap(x => match x {
             | Prop(p) => Some(p)
             | _ => None
         })
@@ -1119,7 +1090,7 @@ module monadbft{
     
     /// Witness: search for a disappearing TIP.
     def missing_tip =
-        val props = csmi::s.logging.msgHistory.filterMap(x => match x {
+        val props = choreo::s.extensions.logging.msgHistory.filterMap(x => match x {
             | Prop(p) => Some(p)
             | _ => None
         })
@@ -1140,19 +1111,7 @@ module monadbft{
                 
     def missing_tip_w = not(missing_tip)
 
-    // ------------------------------------------- Display Utility -------------------------------------------
-    type Display = Address -> Set[ProposalID]
-    pure def displayer(
-        env: Environment
-    ): Display = {
-        env.logging.committed_proposals.
-            transformValues(s => s.map(p => 
-                (
-                p.proposal_id
-                )
-                )
-            )
-        }
+
 }
 
 module test {
