@@ -9,7 +9,7 @@
  */
 
 module glyph {
-  import basicSpells.* from "basicSpells"
+  import basicSpells.* from "../spells/basicSpells"
 
   // TODO: try moving process id to local context
   type LocalState[process_id, ext] = {

@@ -9,7 +9,7 @@
  */
 
 module glyphsBase {
-  import basicSpells.* from "basicSpells"
+  import basicSpells.* from "../spells/basicSpells"
 
   type LocalState[process_id, message, other_fields] = {
     process_id: process_id,
@@ -18,7 +18,7 @@ module glyphsBase {
     | other_fields
   }
 
-  type ListenerOutput[state, effect] = {
+  type HandlerOutput[state, effect] = {
     effects: Set[effect],
     state: state,
   }
@@ -29,7 +29,7 @@ module glyphsBase {
   }
 
   // This is the message routing to the # handler
-  type Listener[p, s, m, o] = (LocalState[p, m, s], Set[m]) => Set[ListenerOutput[LocalState[p, m, s], o]]
+  type ReceiveMessage[p, s, m, o] = (LocalState[p, m, s], m) => HandlerOutput[LocalState[p, m, s], o]
 
   type ApplyEffect[p, s, m, o, b] =
     (GlobalState[p, s, m, b], p, Set[o]) => GlobalState[p, s, m, b]
@@ -41,8 +41,7 @@ module glyphsBase {
 }
 
 module glyphNetwork {
-
-  import basicSpells.* from "basicSpells"
+  import basicSpells.* from "../spells/basicSpells"
   import glyphsBase.*
 
   pure def broadcast(
@@ -67,7 +66,7 @@ module glyphNetwork {
 }
 
 module glyphDriver {
-  import basicSpells.* from "basicSpells"
+  import basicSpells.* from "../spells/basicSpells"
   import glyphsBase.*
 
   const processes: Set[p]
@@ -85,23 +84,42 @@ module glyphDriver {
     }
   }
 
-
+  /// The step action applies a macro step to the system by non deterministically
+  /// selecting a process and processing all messages in its buffer until an external
+  /// effects is produced.
+  /// The action is parameterized by a receive_message function that defines how to handle
+  /// one received message and an apply_effect function that defines how to apply the effects
+  /// of the message processing to the global state.
   action step(
-    ev_listener: Listener[p, s, m, o],
+    receive_message: ReceiveMessage[p, s, m, o],
     apply_effect: ApplyEffect[p, s, m, o, b]
   ): bool = {
-    nondet process = oneOf(processes.filter(v => s.system.get(v).message_buffer != Set()))
+    nondet process = processes.oneOf()
     val msgs = s.system.get(process).message_buffer
-    val initial = s.system.get(process)
-    val valid_transitions = ev_listener(initial, msgs)
+    val initial = { state: s.system.get(process), effects: Set() }
+    
+    val result = msgs.fold(initial, (accumulated_result, message) => {
+      // Stop after finding the first effect
+      if (accumulated_result.effects != Set()) accumulated_result 
+      else {
+        // accumulate the effects of the message
+        val message_result = receive_message(accumulated_result.state, message)
+        {
+          state: message_result.state,
+          effects: accumulated_result.effects.union(message_result.effects)
+        }
+      }
+    })
+    
     all {
-      valid_transitions != Set(),
-      // choose one of the valid transitions
-      nondet transition = oneOf(valid_transitions)
-      // apply the effects of the transition
-      val gs = apply_effect(s, process, transition.effects)
-      val gs1 = {...gs, system: gs.system.put(process, q::debug("test",transition.state))}
-      s' = gs1
+      result.effects != Set(),
+      // apply the effects to the environment
+      val new_system = s.system.set(process, result.state)
+      s' = apply_effect(
+        { ...s, system: new_system },
+        process,
+        result.effects
+      )
     }
   }
 }

@@ -1,8 +1,8 @@
 // -*- mode: Bluespec; -*-
 
 module two_phase_commit {
-  import basicSpells.* from "../../ux/set-based/lib/basicSpells"
-  import glyph(processes = NODES) as glyph from "../../ux/set-based/lib/glyph"
+  import basicSpells.* from "../../spells/basicSpells"
+  import glyph(processes = NODES) as glyph from "../../set-based/glyph"
 
   // Auxiliary types
   type Role = Coordinator | Participant

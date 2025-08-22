@@ -1,7 +1,7 @@
 // -*- mode: Bluespec; -*-
 module tendermint {
-  import basicSpells.* from "../../ux/set-based/lib/basicSpells"
-  import glyph(processes = NODES) as glyph from "../../ux/set-based/lib/glyph"
+  import basicSpells.* from "../../spells/basicSpells"
+  import glyph(processes = NODES) as glyph from "../../set-based/glyph"
 
   type Round = int
   type Stage = ProposeStage | PreVoteStage | PreCommitStage | DecidedStage
@@ -641,7 +641,7 @@ module tendermint {
 }
 
 module valid {
-  import basicSpells.* from "../../ux/set-based/lib/basicSpells"
+  import basicSpells.* from "../../spells/basicSpells"
 
   import tendermint(
     F = 1,
