@@ -41,10 +41,10 @@ module choreo {
   type Listener[p, s, m, e, ce, ext] =
     (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, e, ce]]
 
-  // Only needed for step_granular
+  // Only needed for granular_step
   type Input[m, e] = Message(m) | Event(e)
 
-  // Only needed for step_granular
+  // Only needed for granular_step
   type GranularListener[p, s, m, e, ce, ext] =
     (LocalContext[p, s, m, e, ext], Input[m, e]) => Set[Transition[p, s, m, e, ce]]
 
