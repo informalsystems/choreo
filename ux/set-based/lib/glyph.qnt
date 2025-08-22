@@ -8,100 +8,205 @@
  * Informal Systems, 2025
  */
 
-module glyphsBase {
+module glyph {
   import basicSpells.* from "basicSpells"
 
-  type LocalState[process_id, message, other_fields] = {
-    process_id: process_id,
-    message_buffer: Set[message] // can be moved to GlobalState
-    //internal_events_buffer: Set[e] 
-    | other_fields
+  // TODO: try moving process id to local context
+  type LocalState[process_id, ext] = {
+    process_id: process_id
+    | ext
   }
 
-  type ListenerOutput[state, effect] = {
-    effects: Set[effect],
-    state: state,
+  type Transition[p, s, m, e, ce] = {
+    post_state: LocalState[p, s],
+    effects: Set[Effect[p, m, e, ce]],
   }
 
-  type GlobalState[p, s, m, b] = {
-    system: p -> LocalState[p, m, s],
-    logging: b
+  type GlobalContext[p, s, m, e, ext] = {
+    system: p -> LocalState[p, s],
+    messages: p -> Set[m],
+    events: p -> Set[e],
+    extensions: ext
+  }
+
+  type LocalContext[p, s, m, e, ext] = {
+    state: LocalState[p, s],
+    messages: Set[m],
+    events: Set[e],
+    extensions: ext
   }
 
   // This is the message routing to the # handler
-  type Listener[p, s, m, o] = (LocalState[p, m, s], Set[m]) => Set[ListenerOutput[LocalState[p, m, s], o]]
+  type Listener[p, s, m, e, ce, ext] =
+    (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, e, ce]]
 
-  type ApplyEffect[p, s, m, o, b] =
-    (GlobalState[p, s, m, b], p, Set[o]) => GlobalState[p, s, m, b]
-  
-  pure def logging(env: GlobalState[p, s, m,  b], f: b => b): GlobalState[p, s, m, b] = {
-    { ...env, logging: f(env.logging)}
-  }
+  type EffectProcessor[p, s, m, e, ce, ext] =
+    (GlobalContext[p, s, m, e, ext], ce) => GlobalContext[p, s, m, e, ext]
 
-}
+  type ExtensionsConverter[p, l, g] =
+    (g, p) => l
 
-module glyphNetwork {
+  type Effect[p, m, e, ce] =
+    | Broadcast(m)
+    | Send({ to: p, message: m })
+    | TriggerEvent(e)
+    | CustomEffect(ce)
 
-  import basicSpells.* from "basicSpells"
-  import glyphsBase.*
-
-  pure def broadcast(
-    env: GlobalState[p, s, m, b],
-    msg: m
-  ): GlobalState[p, s, m, b] = {
-    { ...env,
-      system: env.system.transformValues(s => { ...s, message_buffer: s.message_buffer.setAdd(msg) })
-    }
-  }
-
-  pure def send(
-    env: GlobalState[p, s, m, b],
+  pure def apply_effect(
+    env: GlobalContext[p, s, m, e, ext],
     v: p,
-    msg: m
-  ): GlobalState[p, s, m, b] = {
-    { ...env,
-      system: env.system.set(v, { ...env.system.get(v), message_buffer: env.system.get(v).message_buffer.setAdd(msg) })
-    }
+    tr: Transition[p, s, m, e, ce],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, ext]
+  ): GlobalContext[p, s, m, e, ext] = {
+    val env1 = { ...env, system: env.system.setBy(v, s => tr.post_state) }
+
+    tr.effects.fold(env1, (e, effect) => {
+      match effect {
+        | Broadcast(m) => {
+          { ...e, messages: e.messages.transformValues(b => b.setAdd(m)) }
+        }
+        | Send(r) => {
+          { ...e, messages: e.messages.setBy(r.to, b => b.setAdd(r.message)) }
+        }
+        | TriggerEvent(ev) => {
+          { ...e, events: e.events.setBy(v, b => b.setAdd(ev)) }
+        }
+        | CustomEffect(ex) => {
+          apply_custom_effect(e, ex)
+        }
+      }
+    })
   }
-
-}
-
-module glyphDriver {
-  import basicSpells.* from "basicSpells"
-  import glyphsBase.*
 
   const processes: Set[p]
-  var s: GlobalState[p, s, m, b]
+  var s: GlobalContext[p, s, m, e, ext]
 
-  type InitializeProcess[p, m, s] = (p) => LocalState[p, m, s]
-
-  action init(
-    initialize_process: InitializeProcess[p, m, s],
-    initial_logging: b
-  ): bool = all {
-    s' = {
-      system: processes.mapBy(v => initialize_process(v)),
-      logging: initial_logging,
+  pure def initialize(x: a, f: Option[(a) => Set[b]]): Set[b] = {
+    match f {
+      | Some(fun) => fun(x)
+      | None => Set()
     }
   }
 
+  pure def convert_context(
+    env: GlobalContext[p, s, m, e, ext],
+    v: p,
+    local_to_global_extensions: ExtensionsConverter[p, ext, local_ext]
+  ): LocalContext[p, s, m, e, local_ext] = {
+    {
+      state: env.system.get(v),
+      messages: env.messages.get(v),
+      events: env.events.get(v),
+      extensions: local_to_global_extensions(env.extensions, v)
+    }
+  }
+
+  // TODO: displayer
+
+  action init(e: GlobalContext[p, s, m , e, ext]): bool = {
+    s' = e
+  }
 
   action step(
-    ev_listener: Listener[p, s, m, o],
-    apply_effect: ApplyEffect[p, s, m, o, b]
+    listener: Listener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    // displayer: Displayer[p, s, m, te, l, extensions, d],
   ): bool = {
-    nondet process = oneOf(processes.filter(v => s.system.get(v).message_buffer != Set()))
-    val msgs = s.system.get(process).message_buffer
-    val initial = s.system.get(process)
-    val valid_transitions = ev_listener(initial, msgs)
+    nondet v = oneOf(processes)
+    val input = convert_context(s, v, local_to_global_extensions)
+    val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     all {
-      valid_transitions != Set(),
-      // choose one of the valid transitions
-      nondet transition = oneOf(valid_transitions)
-      // apply the effects of the transition
-      val gs = apply_effect(s, process, transition.effects)
-      val gs1 = {...gs, system: gs.system.put(process, q::debug("test",transition.state))}
-      s' = gs1
+      transitions.size() > 0,
+      nondet transition = oneOf(transitions)
+      val post_env = apply_effect(s, v, transition, apply_custom_effect)
+      all {
+        s' = post_env,
+        // display' = displayer(post_env)
+      }
+    }
+  }
+
+  action step_with(
+    v: p,
+    listener: Listener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    // displayer: Displayer[p, s, m, te, l, extensions, d],
+  ): bool = {
+    val input = convert_context(s, v, local_to_global_extensions)
+    val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
+    all {
+      transitions.size() > 0,
+      // FIXME: Quint was supposed to detect determinism alone
+      if (transitions.size() == 1) {
+        val transition = transitions.getOnlyElement()
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      } else {
+        nondet transition = oneOf(transitions)
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      }
+    }
+  }
+
+  action step_with_filter(
+    v: p,
+    listener: Listener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    f: (Transition[p, s, m, e, ce]) => bool,
+    // displayer: Displayer[p, s, m, te, l, extensions, d],
+  ): bool = {
+    val input = convert_context(s, v, local_to_global_extensions)
+    val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state).filter(f)
+    all {
+      transitions.size() > 0,
+      // FIXME: Quint was supposed to detect determinism alone
+      if (transitions.size() == 1) {
+        val transition = transitions.getOnlyElement()
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      } else {
+        nondet transition = oneOf(transitions)
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      }
+    }
+  }
+
+  action step_with_messages(
+    v: p,
+    listener: Listener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    f: Set[m] => Set[m],
+    // displayer: Displayer[p, s, m, te, l, extensions, d],
+  ): bool = {
+    val input = convert_context(s, v, local_to_global_extensions)
+    val input1 = { ...input, messages: f(input.messages) }
+    val transitions = listener(input1).filter(t => t.effects.size() > 0 or t.post_state != input.state)
+    all {
+      transitions.size() > 0,
+      // FIXME: Quint was supposed to detect determinism alone
+      if (transitions.size() == 1) {
+        val transition = transitions.getOnlyElement()
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      } else {
+        nondet transition = oneOf(transitions)
+        val post_env = apply_effect(s, v, transition, apply_custom_effect)
+        s' = post_env
+      }
+    }
+  }
+
+  action lose_messages(v: p, f: Set[m] => Set[m]): bool = {
+    val msgs = s.messages.get(v)
+    val new_msgs = msgs.exclude(f(msgs))
+    all {
+      s' = { ...s, messages: s.messages.set(v, new_msgs) }
     }
   }
 }
