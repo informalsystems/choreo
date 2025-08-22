@@ -102,11 +102,9 @@ module tendermint {
 
   pure def valid(v: Value): bool = {
     VALID_VALUES.contains(v)
-    //true
   }
 
   pure def id(v: Value): ValueId = { hashed: v }
-
 
   pure def start_round(input: LocalContext, round: Round): Transition = {
     val s = input.state
@@ -385,52 +383,47 @@ module tendermint {
     })
   }
 
-  // TODO: Update timeout functions to work with glyph library
-  /*
-  pure def on_propose_timeout(
-      s: LocalState,
-      t: Set[TimeoutEvent]
-  ): Set[ListenerOutput] = {
+  pure def on_propose_timeout(input: LocalContext): Set[Transition] = {
+    val s = input.state
 
-      val candidates = t.filter(t => t.round >= s.round and t.kind == ProposeTimeout)
-      val guard = and {
-          candidates.size() > 0,
-          s.stage == ProposeStage,
-      }
+    val candidates = input.events.filter(t => t.round >= s.round and t.kind == ProposeTimeout)
+    val guard = and {
+      candidates.size() > 0,
+      s.stage == ProposeStage,
+    }
 
-      if (guard)
-
-          Set({
-              effects: Set(Ext(Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
-                          , Inter(StartTimeout({ kind: PreVoteTimeout, round: s.round }))),
-              state: { ...s, stage: PreVoteStage}
-          }
-          )
-      else
-          Set()
+    if (guard)
+      Set({
+        post_state: { ...s, stage: PreVoteStage },
+        effects: Set(
+          glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
+          glyph::TriggerEvent({ kind: PreVoteTimeout, round: s.round })
+        ),
+      })
+    else
+      Set()
   }
 
-  pure def on_prevote_timeout(
-      s: LocalState,
-      t: Set[TimeoutEvent]
-  ): Set[ListenerOutput] = {
-      val candidates = t.filter(t => t.round >= s.round and t.kind == PreVoteTimeout)
-      val guard = and {
-          candidates.size() > 0,
-          s.stage == PreVoteStage,
-      }
-      if (guard)
+  pure def on_prevote_timeout(input: LocalContext): Set[Transition] = {
+    val s = input.state
 
-          Set({
-              effects: Set(Ext(Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
-                          , Inter(StartTimeout({ kind: PreCommitTimeout, round: s.round }))),
-              state: { ...s, stage: PreCommitStage}
-          }
-          )
-      else
-          Set()
+    val candidates = input.events.filter(t => t.round >= s.round and t.kind == PreVoteTimeout)
+    val guard = and {
+      candidates.size() > 0,
+      s.stage == PreVoteStage,
+    }
+
+    if (guard)
+      Set({
+        post_state: { ...s, stage: PreCommitStage },
+        effects: Set(
+          glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
+          glyph::TriggerEvent({ kind: PreCommitTimeout, round: s.round })
+        ),
+      })
+    else
+      Set()
   }
-  */
 
   pure def on_precommit_timeout(input: LocalContext): Set[Transition] = {
     val s = input.state
@@ -456,13 +449,13 @@ module tendermint {
       upon_quorum_prevotes_any(input),
       upon_quorum_nil_prevotes(input),
       upon_quorum_precommits_any(input),
-      //on_propose_timeout(input),
-      //on_prevote_timeout(input),
+      on_propose_timeout(input),
+      on_prevote_timeout(input),
       on_precommit_timeout(input)
     ).flatten()
 
   pure val initial_message =
-    Propose({src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
+    Propose({ src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
 
   pure val initial_bookkeeping = {
     evidence_propose: Set(),
@@ -581,29 +574,28 @@ module tendermint {
   */
   // -------------------------------- semantic symmetry utilities --------------------------------
 
-  val correct_nodes = glyph::s.system.values().filter(s => s.process_id.in(CORRECT))
+  val correct_nodes = s.system.values().filter(s => s.process_id.in(CORRECT))
   val agreement = tuples(correct_nodes, correct_nodes).forall(((p1, p2)) => {
-      p1.decision == None or p2.decision == None or p1.decision == p2.decision})
+     p1.decision == None or p2.decision == None or p1.decision == p2.decision
+  })
 
   val one_decided =
-      not(
-          glyph::s.system.values().forall(v => v.decision == None)
-      )
+    not(s.system.values().forall(v => v.decision == None))
 
   val all_decided =
-      not(
-          correct_nodes.exists(v => v.decision == None)
-      )
+    not(correct_nodes.exists(v => v.decision == None))
 
   // Witness for a to find a case where a node is in the decided stage while another is prevote
   // state
   val stages =
     and {
-        glyph::s.system.values().map(v => v.stage).contains(ProposeStage),
-        glyph::s.system.values().map(v => v.stage).contains(PreVoteStage),
-        glyph::s.system.values().map(v => v.stage).contains(PreCommitStage),
-        glyph::s.system.values().map(v => v.stage).contains(DecidedStage)
+      s.system.values().map(v => v.stage).contains(ProposeStage),
+      s.system.values().map(v => v.stage).contains(PreVoteStage),
+      s.system.values().map(v => v.stage).contains(PreCommitStage),
+      s.system.values().map(v => v.stage).contains(DecidedStage)
     }
+
+  // TODO: properties, evidence
 
   const F: int
   /// The set of correct processes
@@ -724,13 +716,11 @@ module no_agreement {
     .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
 
     // p1 doesn't see the precommit from p2, but there are enough precommits without it
-    .then(step_with("p1", upon_quorum_precommits_any))
+    .then(step_with("p1", upon_proposal_in_prevote_commit))
     // p2 doesn't see the precommit from p1, but there are enough precommits without it
-    .then(step_with("p2", upon_quorum_precommits_any))
+    .then(step_with("p2", upon_proposal_in_prevote_commit))
 
     // Now we just take the final steps towards decision
-    .then(step_with("p1", upon_proposal_in_prevote_commit))
-    .then(step_with("p2", upon_proposal_in_prevote_commit))
     .then(step_with("p1", upon_proposal_in_precommit_no_decision))
     .then(step_with("p2", upon_proposal_in_precommit_no_decision))
     .expect(not(agreement))
