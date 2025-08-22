@@ -1,15 +1,15 @@
 // -*- mode: Bluespec; -*-
 
 /**
- * Quint Glyphs, a library for delightful specifications
+ * Quint Choreos, a library for delightful specifications
  * of distributed systems.
  *
  * Gabriela Moreira, Josef Widder and Yassine Boukhari,
  * Informal Systems, 2025
  */
 
-module glyph {
-  import basicSpells.* from "basicSpells"
+module choreo {
+  import basicSpells.* from "../spells/basicSpells"
 
   // TODO: try moving process id to local context
   type LocalState[process_id, ext] = {

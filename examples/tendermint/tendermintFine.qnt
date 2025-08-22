@@ -1,8 +1,8 @@
 // -*- mode: Bluespec; -*-
 module tendermint{
 
-  import basicSpells.* from "lib/basicSpells"
-  import rareSpells.* from "lib/rareSpells"
+  import basicSpells.* from "../../spells/basicSpells"
+  import rareSpells.* from "../../spells/rareSpells"
 
   type Round = int
   type Height = int
@@ -560,7 +560,7 @@ pure def combined_upon_conditions(s: LocalState, m: Message): bool =
 
 
 //--------------------------------------------------------------------------------
-//-------------------------------- glyphs -----------------------------------------
+//-------------------------------- choreos -----------------------------------------
 //--------------------------------------------------------------------------------
 
   

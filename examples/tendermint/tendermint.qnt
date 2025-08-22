@@ -1,7 +1,7 @@
 // -*- mode: Bluespec; -*-
 module tendermint {
-  import basicSpells.* from "../../ux/set-based/lib/basicSpells"
-  import glyph(processes = NODES) as glyph from "../../ux/set-based/lib/glyph"
+  import basicSpells.* from "../../spells/basicSpells"
+  import choreo(processes = NODES) as choreo from "../../set-based/choreo"
 
   type Round = int
   type Stage = ProposeStage | PreVoteStage | PreCommitStage | DecidedStage
@@ -57,10 +57,10 @@ module tendermint {
   type Extensions = Bookkeeping
 
   /* Boilerplate */
-  type LocalState = glyph::LocalState[Node, StateFields]
-  type LocalContext = glyph::LocalContext[Node, StateFields, Message, Event, Extensions]
-  type Transition = glyph::Transition[Node, StateFields, Message, Event, CustomEffects]
-  type GlobalContext = glyph::GlobalContext[
+  type LocalState = choreo::LocalState[Node, StateFields]
+  type LocalContext = choreo::LocalContext[Node, StateFields, Message, Event, Extensions]
+  type Transition = choreo::Transition[Node, StateFields, Message, Event, CustomEffects]
+  type GlobalContext = choreo::GlobalContext[
     Node,
     StateFields,
     Message,
@@ -117,11 +117,11 @@ module tendermint {
           else
             VALUES.get(round)
 
-        glyph::Broadcast(
+        choreo::Broadcast(
           Propose({ src: s.process_id, round: round, proposal: proposal, valid_round: s.valid_round })
         )
       } else {
-        glyph::TriggerEvent({ kind: ProposeTimeout, round: s.round })
+        choreo::TriggerEvent({ kind: ProposeTimeout, round: s.round })
       }
     {
       effects: Set(effect),
@@ -158,9 +158,9 @@ module tendermint {
     def effect_builder = (p) => {
       // Broadcast the PreVote message for the proposal
       if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
-        Set(glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
+        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
       } else {
-        Set(glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
+        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
       }
     }
 
@@ -199,9 +199,9 @@ module tendermint {
     def effect_builder = (p) => {
       // Broadcast the PreVote message for the proposal
       if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
-        Set(glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
+        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
       } else {
-        Set(glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
+        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
       }
     }
 
@@ -226,7 +226,7 @@ module tendermint {
       // If we have a quorum, we can move to precommit stage
       Set({
         post_state: s,
-        effects: Set(glyph::TriggerEvent({ kind: PreVoteTimeout, round: s.round }))
+        effects: Set(choreo::TriggerEvent({ kind: PreVoteTimeout, round: s.round }))
       })
     } else {
       Set()
@@ -250,7 +250,7 @@ module tendermint {
       // If we have a quorum, we can move to precommit stage
       val outputs = Set({
         post_state: { ...s, stage: PreCommitStage },
-        effects: Set(glyph::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
+        effects: Set(choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
       })
       outputs
     } else {
@@ -272,7 +272,7 @@ module tendermint {
       // If we have a quorum, we can move to decided stage
       Set({
         post_state: s,
-        effects: Set(glyph::TriggerEvent({ kind: PreCommitTimeout, round: s.round }))
+        effects: Set(choreo::TriggerEvent({ kind: PreCommitTimeout, round: s.round }))
       })
     } else {
       Set()
@@ -308,7 +308,7 @@ module tendermint {
     def effect_builder = (p) => {
       if (s.stage == PreVoteStage) {
         // If in prevote stage, broadcast precommit and move to precommit stage
-        Set(glyph::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
+        Set(choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
       } else {
         // If already in precommit stage, just update valid value
         Set()
@@ -396,8 +396,8 @@ module tendermint {
       Set({
         post_state: { ...s, stage: PreVoteStage },
         effects: Set(
-          glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
-          glyph::TriggerEvent({ kind: PreVoteTimeout, round: s.round })
+          choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
+          choreo::TriggerEvent({ kind: PreVoteTimeout, round: s.round })
         ),
       })
     else
@@ -417,8 +417,8 @@ module tendermint {
       Set({
         post_state: { ...s, stage: PreCommitStage },
         effects: Set(
-          glyph::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
-          glyph::TriggerEvent({ kind: PreCommitTimeout, round: s.round })
+          choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
+          choreo::TriggerEvent({ kind: PreCommitTimeout, round: s.round })
         ),
       })
     else
@@ -516,14 +516,14 @@ module tendermint {
     //Set()
   }
 
-  action init = glyph::init({
+  action init = choreo::init({
     system: NODES.mapBy(n => initialize_process(n)),
     messages: NODES.mapBy(n => Set(initial_message).union(byzantine_messages_1)),
     events: NODES.mapBy(n => Set()),
     extensions: initial_bookkeeping
   })
 
-  action step = glyph::step(
+  action step = choreo::step(
     main_listener,
     (c, _) => c,
     (e, p) => e, // env to local context
@@ -531,7 +531,7 @@ module tendermint {
 
 
   // -------------------------------- semantic symmetry utilities --------------------------------
-  // TODO: Update these functions to work with glyph library
+  // TODO: Update these functions to work with choreo library
   /*
   type StateFingerprint = {
     round: Round,
@@ -619,29 +619,29 @@ module tendermint {
   pure val VALID_VALUES = Set("v0", "v1", "v2")
 
   action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
-    glyph::step_with(v, listener, (c, _) => c, (e, p) => e)
+    choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
 
   action step_with_filter(
     v: Node,
     listener: LocalContext => Set[Transition],
     f: Transition => bool
   ): bool =
-    glyph::step_with_filter(v, listener, (c, _) => c, (e, p) => e, f)
+    choreo::step_with_filter(v, listener, (c, _) => c, (e, p) => e, f)
 
   action step_with_messages(
     v: Node,
     listener: LocalContext => Set[Transition],
     f: Set[Message] => Set[Message]
   ): bool =
-    glyph::step_with_messages(v, listener, (c, _) => c, (e, p) => e, f)
+    choreo::step_with_messages(v, listener, (c, _) => c, (e, p) => e, f)
 
-  action lose_messages = glyph::lose_messages
+  action lose_messages = choreo::lose_messages
 
-  val s = glyph::s
+  val s = choreo::s
 }
 
 module valid {
-  import basicSpells.* from "../../ux/set-based/lib/basicSpells"
+  import basicSpells.* from "../../spells/basicSpells"
 
   import tendermint(
     F = 1,
