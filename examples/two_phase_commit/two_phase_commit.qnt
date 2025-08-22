@@ -2,7 +2,7 @@
 
 module two_phase_commit {
   import basicSpells.* from "../../spells/basicSpells"
-  import choreo(processes = NODES) as choreo from "../../set-based/choreo"
+  import choreo(processes = NODES) as choreo from "../../choreo"
 
   // Auxiliary types
   type Role = Coordinator | Participant

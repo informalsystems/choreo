@@ -1,7 +1,7 @@
 // -*- mode: Bluespec; -*-
 module tendermint {
   import basicSpells.* from "../../spells/basicSpells"
-  import choreo(processes = NODES) as choreo from "../../set-based/choreo"
+  import choreo(processes = NODES) as choreo from "../../choreo"
 
   type Round = int
   type Stage = ProposeStage | PreVoteStage | PreCommitStage | DecidedStage
