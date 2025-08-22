@@ -104,8 +104,8 @@ module tendermint {
   /// A value hash in an abstract way.
   pure def id(v: Value): ValueId = { hashed: v }
 
-  pure def start_round(input: LocalContext, round: Round): Transition = {
-    //if (round > MAX_ROUND) Set() else
+  pure def start_round(input: LocalContext, round: Round): Set[Transition] = {
+    if (round > MAX_ROUND) Set() else
     pure val s1 = { 
       ...input.state,
       round: round,
@@ -115,21 +115,21 @@ module tendermint {
 
     if (s1.process_id == PROPOSER.get(round)) {
       pure val proposal = if (s1.valid_value != None) s1.valid_value.unwrap() else VALUES.get(round)
-      { 
+      Set({
         post_state: s1,
         effects: Set(
           choreo::Broadcast(
             Propose({ src: s1.process_id, round: s1.round, proposal: proposal, valid_round: s1.valid_round })
           )
         ),
-      }
+      })
     } else {
-      { 
+      Set({
         post_state: s1,
         effects: Set(
           choreo::TriggerEvent({ kind: ProposeTimeout, round: s1.round })
         ),
-      }
+      })
     }
   }
   
@@ -326,43 +326,34 @@ module tendermint {
         val s = { ...input.state, proposals: input.state.proposals.setAdd(msg) }
         val updated_input = { ...input, state: s }
 
-        Set(
+        pure val results = Set(
           process_proposal_at_propose_stage(updated_input, msg),
           process_proposal_and_quorum_at_propose_stage(updated_input, msg),
           process_proposal_and_quorum_after_prevote_stage_for_the_first_time(updated_input, msg),
         ).flatten()
+
+        if (results.size() > 0) results else Set({ post_state: s, effects: Set() })
       }
 
       | PreVote(msg) => {
-        val s = { ...input.state, prevotes: input.state.prevotes.setAdd(msg) }
-        val updated_input = { ...input, state: s }
+        pure val s = { ...input.state, prevotes: input.state.prevotes.setAdd(msg) }
+        pure val updated_input = { ...input, state: s }
 
-        pure val proposals = s.get_proposals()
-        pure val proposal_handlers = proposals.map(p => {
-          Set(
-            process_proposal_and_quorum_at_propose_stage(updated_input, p),
-            process_proposal_and_quorum_after_prevote_stage_for_the_first_time(updated_input, p),
-          ).flatten()
-        })
-
-        proposal_handlers.union(Set(
+        pure val results = Set(
           process_prevote_quorum_on_prevote_stage(updated_input, msg),
           process_prevote_quorum_at_prevote_stage(updated_input, msg),
-        )).flatten()
+        ).flatten()
+
+        if (results.size() > 0) results else Set({ post_state: s, effects: Set() })
       }
 
       | PreCommit(msg) => {
-        val s = { ...input.state, precommits: input.state.precommits.setAdd(msg) }
-        val updated_input = { ...input, state: s }
+        pure val s = { ...input.state, precommits: input.state.precommits.setAdd(msg) }
+        pure val updated_input = { ...input, state: s }
 
-        pure val proposals = s.get_proposals()
-        pure val proposal_handlers = proposals.map(p => {
-          process_proposal_and_precommit_quorum_but_no_decision(updated_input, p)
-        })
+        pure val results = process_precommit_quorum_for_the_first_time(updated_input, msg)
 
-        proposal_handlers.setAdd(
-          process_precommit_quorum_for_the_first_time(updated_input, msg)
-        ).flatten()
+        if (results.size() > 0) results else Set({ post_state: s, effects: Set() })
       }
     }
   }
@@ -398,7 +389,7 @@ module tendermint {
         // line 65
         if (s.round != t.round) Set() else
 
-        Set(input.start_round(s.round + 1))
+        input.start_round(s.round + 1)
       }
     }
   }
@@ -435,13 +426,12 @@ module tendermint {
 
   // -------------------------------- initialization --------------------------------
   pure val initial_message =
-    Propose({src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
+    Propose({ src: PROPOSER.get(0), round: 0, proposal: VALUES.get(0), valid_round: -1 })
 
   pure val initial_bookkeeping = {
     evidence_propose: Set(),
     evidence_prevote: Set(),
     evidence_precommit: Set(),
-    breakpoint: false,
   }
 
   pure def initialize_process(n: Node): LocalState = {
@@ -521,10 +511,9 @@ module tendermint {
     p1.decision == None or p2.decision == None or p1.decision == p2.decision
   })
 
-  
-  // Witnesses
   val validity = correct_nodes.forall(s => s.decision.in(VALID_VALUES.map(v => Some(v)).setAdd(None)))
-  
+
+  // Witnesses
   val one_decided = not(s.system.values().forall(v => v.decision == None))
   val all_decided = not(correct_nodes.exists(v => v.decision == None))
 
@@ -561,25 +550,25 @@ module tendermint {
   pure val VALID_VALUES = Set("v0","v1", "v2")
 }
 
-module valid{
+module valid {
   import tendermint(
     F = 1,
-    CORRECT = Set("p1","p2", "p3"),
+    CORRECT = Set("p1", "p2", "p3"),
     FAULTY = Set("p4"),
     PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
     VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
-    MAX_ROUND = 4
+    MAX_ROUND = 3
   ).*
 }
 
-module no_agreement{
+module no_agreement {
   import tendermint(
     F = 1,
     CORRECT = Set("p2", "p3"),
     FAULTY = Set("p1","p4"),
     PROPOSER = Map(0 -> "p1", 1 -> "p2", 2 -> "p3", 3 -> "p4"),
     VALUES =  Map(0 -> "v0", 1 -> "v1", 2 -> "v2", 3 -> "v3"),
-    MAX_ROUND = 4
+    MAX_ROUND = 3
   ).*
 }
 
