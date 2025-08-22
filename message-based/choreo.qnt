@@ -1,8 +1,9 @@
 // -*- mode: Bluespec; -*-
 
 /**
- * Quint Choreos, a library for delightful specifications
- * of distributed systems.
+ * Choreo: Choreograph distributed protocols in Quint
+ *
+ * Read the documentation: TODO LINK
  *
  * Gabriela Moreira, Josef Widder and Yassine Boukhari,
  * Informal Systems, 2025
