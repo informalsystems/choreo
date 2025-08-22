@@ -24,13 +24,11 @@ module monadbft{
         | NoEndorsement(NoEndorsementMsg)
 
     type CustomEffects =
-        | BroadcastProp(Proposal)
-        | BroadCastTimeout(TimeoutMsg)
+        | LogMessage(Message)
+        | LogProposal(Proposal)
         | Commit(Proposal)
         | EarlyConfirmation(Proposal)
         | Confirmation(Proposal)
-        | SendVoteToNextLeader((Address, VoteMsg))
-        | StartTimeout(TimeoutData)
     // Algorithm 5 (block recovery) has more responses
 
     type Logging = {
@@ -538,7 +536,7 @@ module monadbft{
     pure def increment_view(view: int, s: LocalState): Transition = {
         if (view >= s.curView)
         // Increment view to next and reset the timer, old timers are discarded at apply_effect
-        { post_state: { ...s, curView: view + 1 }, effects: Set(choreo::CustomEffect(StartTimeout(view + 1))) }
+        { post_state: { ...s, curView: view + 1 }, effects: Set(choreo::TriggerEvent(TimeoutEvent(view + 1))) }
         else
         // If we are already in a higher view, we do not change the state.
         { post_state: s, effects: Set() }
@@ -560,7 +558,10 @@ module monadbft{
 
         {
             post_state: { ...s, highest_voted_view: max(s.highest_voted_view, s.curView) },
-            effects: Set(choreo::CustomEffect(BroadCastTimeout(timeout_msg)))
+            effects: Set(
+                choreo::Broadcast(Timeout(timeout_msg)),
+                choreo::CustomEffect(LogMessage(Timeout(timeout_msg)))
+            )
         }
     }
 
@@ -662,7 +663,10 @@ module monadbft{
 
                 // TODO: send to next leader
                 pure val next_leader = leader_from_view(p.view + 1)
-                pure val send_vote = Set(choreo::CustomEffect(SendVoteToNextLeader((next_leader, vote_msg))))
+                pure val send_vote = Set(
+                    choreo::Send({to: next_leader, message: Vote(vote_msg)}),
+                    choreo::CustomEffect(LogMessage(Vote(vote_msg)))
+                )
 
                 {
                     post_state: { ...s, highest_voted_view: p.view, ledger: ledger, tip: update_tip(p) },
@@ -719,7 +723,10 @@ module monadbft{
                             // Line 17
                         val block = get_present_block(mock, high_tip.block_header)
                         val p = build_proposal(s.curView, block, tc, None, s.process_id)
-                        { post_state: s, effects: Set(choreo::CustomEffect(BroadcastProp(p)))}
+                        { post_state: s, effects: Set(
+                            choreo::Broadcast(Prop(p)),
+                            choreo::CustomEffect(LogProposal(p))
+                        )}
                             // Line 18-19-20 recoveringcurView ← true; SendRecoveryRequest(curView, high tip, tc);
                             // TODO: For the moment this is replaced by fetching the block from the DA variable for debugging purposes
                      
@@ -771,7 +778,10 @@ module monadbft{
                             transition.and_then(s => {
                                 val new_block = build_block(qc, BLOCK_PAYLOAD)
                                 val p = build_proposal(s.curView, new_block, None, None, s.process_id)
-                                {post_state: s, effects: Set(choreo::CustomEffect(BroadcastProp(p)))}
+                                {post_state: s, effects: Set(
+                                    choreo::Broadcast(Prop(p)),
+                                    choreo::CustomEffect(LogProposal(p))
+                                )}
                             })                             
                         })
         candidates
@@ -850,37 +860,26 @@ module monadbft{
 
     pure def apply_custom_effect(env: GlobalContext, effect: CustomEffects): GlobalContext = {
         match effect {
-            | BroadcastProp(p) => {
-                // Update logging and extensions, then broadcast
+            | LogMessage(msg) => {
+                val ext = env.extensions
+                val log = ext.logging
+                val ext1 = {...ext,
+                    logging: {...log, msgHistory: log.msgHistory.setAdd(msg)}
+                }
+                {...env, extensions: ext1}
+            }
+            | LogProposal(p) => {
                 val ext = env.extensions
                 val log = ext.logging
                 val ext1 = {...ext, 
                     proposals_mock: ext.proposals_mock.setAdd(p),
                     logging: {...log, msgHistory: log.msgHistory.setAdd(Prop(p))},
                 }
-                // Apply the effect through choreo's broadcast mechanism
-                {...env,
-                    extensions: update_ancestors(ext1, p),
-                    messages: env.messages.transformValues(s => s.setAdd(Prop(p)))
-                }
-            }
-            | BroadCastTimeout(t) => {
-                val ext = env.extensions
-                val log = ext.logging
-                val ext1 = {...ext,
-                    logging: {...log, msgHistory: log.msgHistory.setAdd(Timeout(t))}
-                }
-                {...env,
-                    extensions: ext1,
-                    messages: env.messages.transformValues(s => s.setAdd(Timeout(t)))
-                }
+                {...env, extensions: update_ancestors(ext1, p)}
             }
             | Commit(p) => {
-                // Find the process that committed
                 val ext = env.extensions
                 val log = ext.logging
-                // We need to know which process committed, but that's not in the effect
-                // This is a limitation - for now, we'll just update extensions
                 val ext1 = {...ext,
                     logging: {...log, 
                         committed_proposals: log.committed_proposals.transformValues(s => s.setAdd(p))
@@ -890,22 +889,6 @@ module monadbft{
             }
             | EarlyConfirmation(p) => env
             | Confirmation(p) => env
-            | SendVoteToNextLeader(am) => {
-                val ext = env.extensions
-                val log = ext.logging
-                val ext1 = {...ext,
-                    logging: {...log, msgHistory: log.msgHistory.setAdd(Vote(am._2))}
-                }
-                {...env,
-                    extensions: ext1,
-                    messages: env.messages.setBy(am._1, s => s.setAdd(Vote(am._2)))
-                }
-            }
-            | StartTimeout(t) => {
-                // This should trigger an event - but we need to know which process
-                // For now, return unchanged - this needs to be handled differently
-                env
-            }
         }
     }
     // ------------------------------------------- Initialization & Execution -------------------------------------------
