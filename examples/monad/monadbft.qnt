@@ -1157,5 +1157,5 @@ module monadbft{
 }
 
 module test {
-  import monadbft(validators = Set("v1", "v2", "v3", "v4"), F = 1).*
+  import monadbft(validators = Set("v1", "v2", "v3", "v4"), F = 1, B = 25).*
 }
