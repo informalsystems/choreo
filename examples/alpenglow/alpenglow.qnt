@@ -9,8 +9,8 @@
  */
 
 module alpenglow {
-  import basicSpells.* from "lib/basicSpells"
-  import statemachine(processes = Set()) as csmi from "statemachine"
+  import basicSpells.* from "../../spells/basicSpells"
+  import choreo(processes = correct.union(good)) as choreo from "../../choreo"
 
   // -------------------------------------  Constants -------------------------------------------------
   /// Set of correct processes (non Byzantine)
@@ -34,12 +34,11 @@ module alpenglow {
   // Wiring into the reusable consensus state machine interface
   //
 
-  type TimeoutEventData = Slot // TODO not sure what timeouts they start
+  type TimeoutEvent = Slot
 
-  type Effect =
-    | ScheduleEventTimeout(TimeoutEventData) // might be multiple from one function call
-    | ExcludeTimeout(TimeoutEventData)
-    | Broadcast(Message)
+  type CustomEffects = 
+    | ScheduleEventTimeout(TimeoutEvent)
+    | ExcludeTimeout(TimeoutEvent)
 
     /// Table 4 (Alpenglow’s voting messages)
   type Message =
@@ -54,12 +53,20 @@ module alpenglow {
     sender: ProcessID,
     msg: Message,
   }
-  type LocalState = csmi::LocalState[ProcessID, State]
-  type Logging = {}
-  type Transition = csmi::Transition[LocalState, Effect]
-  type Transitions = csmi::Transitions[Transition]
-  type Environment = csmi::Environment[ProcessID, State, Message, TimeoutEventData, Logging, {}]
-  type LocalContext = csmi::LocalContext[Message, TimeoutEventData, {}]
+  type Extensions = {}
+
+  /* Boilerplate */
+  type LocalState = choreo::LocalState[ProcessID, State]
+  type LocalContext = choreo::LocalContext[ProcessID, State, Message, TimeoutEvent, Extensions]
+  type Transition = choreo::Transition[ProcessID, State, Message, TimeoutEvent, CustomEffects]
+  type GlobalContext = choreo::GlobalContext[
+    ProcessID,
+    State,
+    Message,
+    TimeoutEvent,
+    Extensions
+  ]
+  /* End of boilerplate */
 
   // ------------------------------------- Data Types ------------------------------------------------
   type Slot = int
@@ -102,21 +109,13 @@ module alpenglow {
 
   // -------------------------------------  State Machine Related Types -------------------------------------
 
-
-  type Bookkeeping
-
-  type Result = {
-    output: Set[Effect],
-    post: LocalState,
-  }
-  
   type ListenerInput = {
     msgBuffer: Set[NetworkMsg], // Messages received by the process
-    internalBuffer: Set[Slot], // Timeouts for the process
+    internalBuffer: Set[TimeoutEvent], // Timeouts for the process
     now: Slot, // Current slot
   }
   
-  type ListenerOutput = Set[Result]
+  type ListenerOutput = Set[Transition]
 
 
 
@@ -307,14 +306,14 @@ module alpenglow {
     else
       Set(slot - 3, slot - 2, slot - 1, slot)
 
-  pure def setTimeouts(ls: LocalState, slot: Slot): Result =
-    { post: ls,
-      output: windowSlots(slot).map(i => (ScheduleEventTimeout(i))) }
+  pure def setTimeouts(ls: LocalState, slot: Slot): Transition =
+    { post_state: ls,
+      effects: windowSlots(slot).map(i => choreo::CustomEffect(ScheduleEventTimeout(i))) }
 
   /// Check if a notarization vote can be cast
-  pure def tryNotar(ls: LocalState, b: Block): { result: Result, success: bool } =
+  pure def tryNotar(ls: LocalState, b: Block): { result: Transition, success: bool } =
     if (ls.state[b.slot].contains(Voted))
-      { result: { post: ls, output: Set() }, success: false }
+      { result: { post_state: ls, effects: Set() }, success: false }
     else
       val firstSlot = firstSlotInLeaderWindow(b.slot)
       if ((firstSlot and ParentReady(b.parent).in(ls.state[b.slot]))
@@ -322,7 +321,7 @@ module alpenglow {
         // Warning: parentheses not matching in paper
 
         // Notarization vote
-        val out = Set(Broadcast(NotarVoteMsg({ slot:b.slot, hash: b.hash })))
+        val out = Set(choreo::Broadcast(NotarVoteMsg({ slot:b.slot, hash: b.hash })))
         val s2 = ls
           .addObjects(b.slot, Set(Voted, VotedNotar(b.hash)))
           // Won't vote notar a second time
@@ -331,42 +330,42 @@ module alpenglow {
         // Maybe vote finalize as well
         val tf = tryFinal(s2, b.slot, b.hash)
 
-        { result: { post: tf.post, output: out.union(tf.output) }, success: true }
+        { result: { post_state: tf.post_state, effects: out.union(tf.effects) }, success: true }
       else
-        { result: { post: ls, output: Set() }, success: false }
+        { result: { post_state: ls, effects: Set() }, success: false }
 
-  pure def tryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Result =
+  pure def tryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Transition =
     if (BlockNotarized(hash).in(ls.state[slot]) and VotedNotar(hash).in(ls.state[slot])
         and not(BadWindow.in(ls.state[slot])))
       // Finalization vote
-      { output: Set(Broadcast(FinalVoteMsg(slot))), post: ls.addObjects(slot, Set(ItsOver)) }
+      { effects: Set(choreo::Broadcast(FinalVoteMsg(slot))), post_state: ls.addObjects(slot, Set(ItsOver)) }
     else
-      { output: Set(), post: ls }
+      { effects: Set(), post_state: ls }
 
-  pure def trySkipWindow(ls: LocalState, slot: Slot): Result =
+  pure def trySkipWindow(ls: LocalState, slot: Slot): Transition =
     // Skip unvoted slots
-    windowSlots(slot).fold({ output: Set(), post: ls }, (s, k) => {
-      if (not(Voted.in(s.post.state[k])))
+    windowSlots(slot).fold({ effects: Set(), post_state: ls }, (s, k) => {
+      if (not(Voted.in(s.post_state.state[k])))
         // Skip vote
-        val update = Set(Broadcast(SkipVoteMsg(k)))
-        val s2 = s.post
+        val update = Set(choreo::Broadcast(SkipVoteMsg(k)))
+        val s2 = s.post_state
           .addObjects(k, Set(Voted, BadWindow))
           // Won't vote notar after skip
           .setPendingBlock(k, None)
 
-        { output: s.output.union(update), post: s2 }
+        { effects: s.effects.union(update), post_state: s2 }
       else
         s
     })
 
-  pure def checkPendingBlocks(ls: LocalState): Result =
+  pure def checkPendingBlocks(ls: LocalState): Transition =
     // Iterate with increasing slot
     // (left to right)
-    ls.pendingBlocks.foldl({ output: Set(), post: ls }, (res, pendingBlock) =>
+    ls.pendingBlocks.foldl({ effects: Set(), post_state: ls }, (res, pendingBlock) =>
       match pendingBlock {
         | Some(b) =>
-          val tn = tryNotar(res.post, b)
-          { output: res.output.union(tn.result.output), post: tn.result.post } // TODO implement
+          val tn = tryNotar(res.post_state, b)
+          { effects: res.effects.union(tn.result.effects), post_state: tn.result.post_state } // TODO implement
         | None =>
           res
       }
@@ -486,15 +485,15 @@ module alpenglow {
         // If the block is not in the pending blocks, we add it
         val tn = tryNotar(ls, b) // looks like a function but has two side effects: changes state and broadcasts
         if (tn.success)
-          val cpb = checkPendingBlocks(tn.result.post)
+          val cpb = checkPendingBlocks(tn.result.post_state)
           // as tryNotar changed the local state, we pass it to checkPendingBlocks
-          { post: cpb.post, output: cpb.output.union(tn.result.output) }
+          { post_state: cpb.post_state, effects: cpb.effects.union(tn.result.effects) }
           // both, tryNotar and checkPendingBlocks have side effects of sending messages. Thus we build the union here.
-        else if (not(Voted.in(tn.result.post.state[b.slot])))
-          { output: tn.result.output, post: tn.result.post.setPendingBlock(b.slot, Some(b)) }
+        else if (not(Voted.in(tn.result.post_state.state[b.slot])))
+          { effects: tn.result.effects, post_state: tn.result.post_state.setPendingBlock(b.slot, Some(b)) }
         else
           // Even if all if conditions evaluate to false, tryNotar may have side effects and may change the local state
-          { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
+          { effects: tn.result.effects, post_state: tn.result.post_state } // Warning: The state might have changed
     })
     results 
       
@@ -508,7 +507,7 @@ module alpenglow {
     val condition = timeouts.contains(slot)
     if (not(condition))
       // No change state, no messages sent
-      Set({ output: Set(), post: ls })
+      Set({ effects: Set(), post_state: ls })
     else
       // If the timeout is set, we try to skip the window
       // We assume that the timeout is set for the current slot
@@ -516,7 +515,7 @@ module alpenglow {
           trySkipWindow(ls, slot)
         else
           // No change state, no messages sent
-          {output: Set(), post: ls }
+          {effects: Set(), post_state: ls }
       Set(candidate)
 
 
@@ -555,8 +554,8 @@ module alpenglow {
         val s1 = ls.addObjects(sh.slot, Set(ParentReady(sh.hash)))
         val s2 = checkPendingBlocks(s1)
         // Start time for all slots in this window
-        val s3 = setTimeouts(s2.post, sh.slot)
-        { output: s2.output.union(s3.output), post: s2.post }
+        val s3 = setTimeouts(s2.post_state, sh.slot)
+        { effects: s2.effects.union(s3.effects), post_state: s2.post_state }
       }
     )
 
@@ -569,14 +568,14 @@ module alpenglow {
   ): ListenerOutput =
     val msgs = input.msgBuffer
     val now = input.now
-    val candidates = allBlocks.filter(b => safeToNotarCondition(ls.pid, msgs, now, b))
+    val candidates = allBlocks.filter(b => safeToNotarCondition(ls.process_id, msgs, now, b))
                         .map(b => {slot: b.slot, hash: b.hash})
     candidates.map(sh => {
         val s1 = trySkipWindow(ls, sh.slot)
-        if (not(ItsOver.in(s1.post.state[sh.slot])))
+        if (not(ItsOver.in(s1.post_state.state[sh.slot])))
           // Notar-fallback vote
-          val output = s1.output.union(Set(Broadcast(NotarFallBackVoteMsg(sh))))
-          { output: output, post: s1.post.addObjects(sh.slot, Set(BadWindow)) }
+          val output = s1.effects.union(Set(choreo::Broadcast(NotarFallBackVoteMsg(sh))))
+          { effects: output, post_state: s1.post_state.addObjects(sh.slot, Set(BadWindow)) }
         else
           s1
       }
@@ -589,16 +588,16 @@ module alpenglow {
   ): ListenerOutput =
     val slot = input.now
     val msgs = input.msgBuffer
-    val condition = safeToSkipCondition(ls.pid, msgs, slot)
+    val condition = safeToSkipCondition(ls.process_id, msgs, slot)
     if (not(condition))
       Set()
     else
       val candidate = {
           val s1 = trySkipWindow(ls, slot)
-          if (not(ItsOver.in(s1.post.state[slot])))
+          if (not(ItsOver.in(s1.post_state.state[slot])))
             // Skip-fallback vote
-            val output = s1.output.union(Set(Broadcast(SkipFallbackVoteMsg(slot))))
-            { output: output, post: addObjects(s1.post, slot, Set(BadWindow)) }
+            val output = s1.effects.union(Set(choreo::Broadcast(SkipFallbackVoteMsg(slot))))
+            { effects: output, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
           else
             s1
         }
@@ -613,7 +612,7 @@ module alpenglow {
       parentReady(ls, input),
       safeToNotar(ls, input),
       safeToSkip(ls, input)
-    ).flatten().filter(out => out.output.size() > 0 or out.post != ls) // Flatten the set of sets into a single set of results
+    ).flatten().filter(out => out.effects.size() > 0 or out.post_state != ls) // Flatten the set of sets into a single set of results
     res
 
 }
