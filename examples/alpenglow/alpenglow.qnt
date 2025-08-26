@@ -440,91 +440,41 @@ module alpenglow {
       .surpassesThreshold(40)
   }
 
-  /// Algorithm 1: each upon corresponds to one consensus input
-  pure def consensus(ls: LocalState, input: ConsensusInput): Transition =
-    match input {
-      | BlockInput(b) =>
-        val tn = tryNotar(ls, b) // looks like a function but has two side effects: changes state and broadcasts
-        if (tn.success)
-          val cpb = checkPendingBlocks(tn.result.post_state)
-          // as tryNotar changed the local state, we pass it to checkPendingBlocks
-          { post_state: cpb.post_state, effects: cpb.effects.union(tn.result.effects) }
-          // both, tryNotar and checkPendingBlocks have side effects of sending messages. Thus we build the union here.
-        else if (not(Voted.in(tn.result.post_state.state[b.slot])))
-          { effects: tn.result.effects, post_state: setPendingBlock(tn.result.post_state, b.slot, Some(b)) }
-        else
-          // Even if all if conditions evaluate to false, tryNotar may have side effects and may change the local state
-          tn.result // The state might have changed although all if conditions evaluate to false
-
-      | TimeOutInput(slot) =>
-        if (not(Voted.in(ls.state[slot])))
-          trySkipWindow(ls, slot)
-        else
-          // No change state, no messages sent
-          { effects: Set(), post_state: ls }
-
-      | BlockNotarizedInput(sh) =>
-        val s1 = addObjects(ls, sh.slot, Set(BlockNotarized(sh.hash)))
-        tryFinal(s1, sh.slot, sh.hash)
-
-      | ParentReadyInput(sh) =>
-        val s1 = addObjects(ls, sh.slot, Set(ParentReady(sh.hash)))
-        val s2 = checkPendingBlocks(s1)
-        // Start time for all slots in this window
-        val s3 = setTimeouts(s2.post_state, sh.slot)
-        { effects: s2.effects.union(s3.effects), post_state: s3.post_state }
-
-      | SafeToNotarInput(sh) =>
-        val s1 = trySkipWindow(ls, sh.slot)
-        if (not(ItsOver.in(s1.post_state.state[sh.slot])))
-          // Notar-fallback vote
-          val effects = s1.effects.union(
-            Set(choreo::Broadcast({ sender: ls.process_id, msg: NotarFallBackVoteMsg(sh) }))
-          )
-          { effects: effects, post_state: addObjects(s1.post_state, sh.slot, Set(BadWindow)) }
-        else
-          s1
-
-      | SafeToSkipInput(slot) =>
-        val s1 = trySkipWindow(ls, slot)
-        if (not(ItsOver.in(s1.post_state.state[slot])))
-          // Skip-fallback vote
-          val effects = s1.effects.union(
-            Set(choreo::Broadcast({ sender: ls.process_id, msg: SkipFallbackVoteMsg(slot) }))
-          )
-          { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
-        else
-          s1
-    }
-
   // -----------------------------------------------------------------------------
-  // Listener functions (converted from statemachine.qnt actions)
+  // Listeners (Algorithm 1)
   // -----------------------------------------------------------------------------
-
-  /// Process consensus input and convert to choreo transition
-  pure def processConsensusInput(input: ConsensusInput, ctx: LocalContext): Set[Transition] = {
-    val result = consensus(ctx.state, input)
-    if (result.effects.size() > 0 or result.post_state != ctx.state) {
-      Set(result)
-    } else {
-      Set()
-    }
-  }
 
   /// Listen for block input
   pure def upon_block_input(ctx: LocalContext): Set[Transition] = {
     val availableBlocks = allBlocks.filter(b => aliveSlots.contains(b.slot))
-    availableBlocks.fold(Set(), (acc, block) =>
-      acc.union(processConsensusInput(BlockInput(block), ctx))
-    )
+
+    availableBlocks.map(b => {
+      val tn = tryNotar(ctx.state, b) // looks like a function but has two side effects: changes state and broadcasts
+      if (tn.success)
+        val cpb = checkPendingBlocks(tn.result.post_state)
+        // as tryNotar changed the local state, we pass it to checkPendingBlocks
+        { post_state: cpb.post_state, effects: cpb.effects.union(tn.result.effects) }
+        // both, tryNotar and checkPendingBlocks have side effects of sending messages. Thus we build the union here.
+      else if (not(Voted.in(tn.result.post_state.state[b.slot])))
+        { post_state: setPendingBlock(tn.result.post_state, b.slot, Some(b)), effects: tn.result.effects }
+      else
+        // Even if all if conditions evaluate to false, tryNotar may have side effects and may change the local state
+        tn.result
+    })
   }
 
   /// Listen for timeout events
   pure def upon_timeout(ctx: LocalContext): Set[Transition] = {
     val activeTimeouts = ctx.events
-    aliveSlots.filter(slot => activeTimeouts.contains(slot)).fold(Set(), (acc, slot) =>
-      acc.union(processConsensusInput(TimeOutInput(slot), ctx))
-    )
+    val ls = ctx.state
+
+    aliveSlots.filter(slot => activeTimeouts.contains(slot)).filterMap(slot => {
+      if (not(Voted.in(ls.state[slot])))
+        Some(trySkipWindow(ls, slot))
+      else
+        // No change state, no messages sent
+        None
+    })
   }
 
   /// Listen for block notarized events
@@ -533,9 +483,11 @@ module alpenglow {
       isCertified(NotarizationCertificate({ slot: b.slot, hash: b.hash }), ctx.messages) and
       aliveSlots.contains(b.slot)
     )
-    notarizedBlocks.fold(Set(), (acc, block) =>
-      acc.union(processConsensusInput(BlockNotarizedInput({ slot: block.slot, hash: block.hash }), ctx))
-    )
+
+    notarizedBlocks.map(block => {
+      val s1 = addObjects(ctx.state, block.slot, Set(BlockNotarized(block.hash)))
+      tryFinal(s1, block.slot, block.hash)
+    })
   }
 
   /// Listen for parent ready events
@@ -544,9 +496,15 @@ module alpenglow {
       aliveSlots.contains(b.slot) and
       parentReadyCondition(b.slot, b.hash, ctx.messages)
     )
-    readyBlocks.fold(Set(), (acc, block) =>
-      acc.union(processConsensusInput(ParentReadyInput({ slot: block.slot, hash: block.hash }), ctx))
-    )
+
+    readyBlocks.map(block => {
+      val r1 =
+        addObjects(ctx.state, block.slot, Set(ParentReady(block.hash)))
+          .checkPendingBlocks()
+      // Start time for all slots in this window
+      val r2 = setTimeouts(r1.post_state, block.slot)
+      { effects: r1.effects.union(r2.effects), post_state: r2.post_state }
+    })
   }
 
   /// Listen for safe to notar events
@@ -555,17 +513,37 @@ module alpenglow {
       aliveSlots.contains(b.slot) and
       safeToNotarCondition(ctx.state.process_id, ctx.messages, b.slot, b)
     )
-    safeBlocks.fold(Set(), (acc, block) =>
-      acc.union(processConsensusInput(SafeToNotarInput({ slot: block.slot, hash: block.hash }), ctx))
-    )
+
+    safeBlocks.map(block => {
+      val s1 = trySkipWindow(ctx.state, block.slot)
+      if (not(ItsOver.in(s1.post_state.state[block.slot])))
+        // Notar-fallback vote
+        val effects = s1.effects.union(
+          Set(choreo::Broadcast({
+            sender: ctx.state.process_id,
+            msg: NotarFallBackVoteMsg({ slot: block.slot, hash: block.hash })
+          }))
+        )
+        { effects: effects, post_state: addObjects(s1.post_state, block.slot, Set(BadWindow)) }
+      else
+        s1
+    })
   }
 
   /// Listen for safe to skip events
   pure def upon_safe_to_skip(ctx: LocalContext): Set[Transition] = {
     val safeSlots = aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, ctx.messages, slot))
-    safeSlots.fold(Set(), (acc, slot) =>
-      acc.union(processConsensusInput(SafeToSkipInput(slot), ctx))
-    )
+    safeSlots.map(slot => {
+      val s1 = trySkipWindow(ctx.state, slot)
+      if (not(ItsOver.in(s1.post_state.state[slot])))
+        // Skip-fallback vote
+        val effects = s1.effects.union(
+          Set(choreo::Broadcast({ sender: ctx.state.process_id, msg: SkipFallbackVoteMsg(slot) }))
+        )
+        { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
+      else
+        s1
+    })
   }
 
   /// Main listener combining all event handlers
