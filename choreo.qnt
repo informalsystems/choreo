@@ -1,15 +1,16 @@
 // -*- mode: Bluespec; -*-
 
 /**
- * Quint Choreos, a library for delightful specifications
- * of distributed systems.
+ * Choreo: Choreograph distributed protocols in Quint
+ *
+ * Read the documentation: TODO LINK
  *
  * Gabriela Moreira, Josef Widder and Yassine Boukhari,
  * Informal Systems, 2025
  */
 
 module choreo {
-  import basicSpells.* from "../spells/basicSpells"
+  import basicSpells.* from "spells/basicSpells"
 
   // TODO: try moving process id to local context
   type LocalState[process_id, ext] = {
@@ -39,6 +40,13 @@ module choreo {
   // This is the message routing to the # handler
   type Listener[p, s, m, e, ce, ext] =
     (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, e, ce]]
+
+  // Only needed for granular_step
+  type Input[m, e] = Message(m) | Event(e)
+
+  // Only needed for granular_step
+  type GranularListener[p, s, m, e, ce, ext] =
+    (LocalContext[p, s, m, e, ext], Input[m, e]) => Set[Transition[p, s, m, e, ce]]
 
   type EffectProcessor[p, s, m, e, ce, ext] =
     (GlobalContext[p, s, m, e, ext], ce) => GlobalContext[p, s, m, e, ext]
@@ -101,6 +109,22 @@ module choreo {
     }
   }
 
+  action process_transitions(
+    v: p,
+    transitions: Set[Transition[p, s, m, e, ce]],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+  ): bool =
+    // FIXME: Quint was supposed to detect determinism alone
+    if (transitions.size() == 1) {
+      val transition = transitions.getOnlyElement()
+      val post_env = apply_effect(s, v, transition, apply_custom_effect)
+      s' = post_env
+    } else {
+      nondet transition = oneOf(transitions)
+      val post_env = apply_effect(s, v, transition, apply_custom_effect)
+      s' = post_env
+    }
+
   // TODO: displayer
 
   action init(e: GlobalContext[p, s, m , e, ext]): bool = {
@@ -116,14 +140,24 @@ module choreo {
     nondet v = oneOf(processes)
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
-    all {
-      transitions.size() > 0,
-      nondet transition = oneOf(transitions)
-      val post_env = apply_effect(s, v, transition, apply_custom_effect)
-      all {
-        s' = post_env,
-        // display' = displayer(post_env)
-      }
+    process_transitions(v, transitions, apply_custom_effect)
+  }
+
+  action granular_step(
+    listener: GranularListener[p, s, m, e, ce, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+  ): bool = {
+    nondet process = processes.oneOf()
+    val ctx = convert_context(s, process, local_to_global_extensions)
+    any {
+      nondet msg = s.messages.get(process).oneOf()
+      val transitions = listener(ctx, Message(msg))
+      process_transitions(process, transitions, apply_custom_effect),
+
+      nondet event = s.events.get(process).oneOf()
+      val transitions = listener(ctx, Event(event))
+      process_transitions(process, transitions, apply_custom_effect),
     }
   }
 
@@ -136,19 +170,7 @@ module choreo {
   ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
-    all {
-      transitions.size() > 0,
-      // FIXME: Quint was supposed to detect determinism alone
-      if (transitions.size() == 1) {
-        val transition = transitions.getOnlyElement()
-        val post_env = apply_effect(s, v, transition, apply_custom_effect)
-        s' = post_env
-      } else {
-        nondet transition = oneOf(transitions)
-        val post_env = apply_effect(s, v, transition, apply_custom_effect)
-        s' = post_env
-      }
-    }
+    process_transitions(v, transitions, apply_custom_effect)
   }
 
   action step_with_filter(
@@ -161,19 +183,7 @@ module choreo {
   ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state).filter(f)
-    all {
-      transitions.size() > 0,
-      // FIXME: Quint was supposed to detect determinism alone
-      if (transitions.size() == 1) {
-        val transition = transitions.getOnlyElement()
-        val post_env = apply_effect(s, v, transition, apply_custom_effect)
-        s' = post_env
-      } else {
-        nondet transition = oneOf(transitions)
-        val post_env = apply_effect(s, v, transition, apply_custom_effect)
-        s' = post_env
-      }
-    }
+    process_transitions(v, transitions, apply_custom_effect)
   }
 
   action step_with_messages(
@@ -187,19 +197,7 @@ module choreo {
     val input = convert_context(s, v, local_to_global_extensions)
     val input1 = { ...input, messages: f(input.messages) }
     val transitions = listener(input1).filter(t => t.effects.size() > 0 or t.post_state != input.state)
-    all {
-      transitions.size() > 0,
-      // FIXME: Quint was supposed to detect determinism alone
-      if (transitions.size() == 1) {
-        val transition = transitions.getOnlyElement()
-        val post_env = apply_effect(s, v, transition, apply_custom_effect)
-        s' = post_env
-      } else {
-        nondet transition = oneOf(transitions)
-        val post_env = apply_effect(s, v, transition, apply_custom_effect)
-        s' = post_env
-      }
-    }
+    process_transitions(v, transitions, apply_custom_effect)
   }
 
   action lose_messages(v: p, f: Set[m] => Set[m]): bool = {

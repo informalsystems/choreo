@@ -4,13 +4,13 @@
  *
  * [1]: https://drive.google.com/file/d/1y_7ddr8oNOknTQYHzXeeMD2ProQ0WjMs/view
  *
- * Josef Widder, Gabriela Moreira and Yassine Boukhari 
+ * Josef Widder, Gabriela Moreira
  * Informal Systems, 2025
  */
 
 module alpenglow {
-  import basicSpells.* from "lib/basicSpells"
-  import statemachine(processes = Set()) as csmi from "statemachine"
+  import basicSpells.* from "../../spells/basicSpells"
+  import choreo(processes = correct.union(good)) as choreo from "../../choreo"
 
   // -------------------------------------  Constants -------------------------------------------------
   /// Set of correct processes (non Byzantine)
@@ -19,6 +19,8 @@ module alpenglow {
   const good: Set[ProcessID]
   /// Set of Byzantine processes
   const byzantine: Set[ProcessID]
+  /// Voting power of the processes
+  const power: ProcessID -> int
   /// Set of blocks
   const correctBlocks: Set[Block]
   /// Set of Byzantine blocks
@@ -29,39 +31,9 @@ module alpenglow {
   const aliveHashes: Set[Blockhash]
   
   //---------------------------------------------------------------------------------------------------
+
   type ProcessID = str
-  //
-  // Wiring into the reusable consensus state machine interface
-  //
 
-  type TimeoutEventData = Slot // TODO not sure what timeouts they start
-
-  type Effect =
-    | ScheduleEventTimeout(TimeoutEventData) // might be multiple from one function call
-    | ExcludeTimeout(TimeoutEventData)
-    | Broadcast(Message)
-
-    /// Table 4 (Alpenglow’s voting messages)
-  type Message =
-    | NotarVoteMsg(BlockReference)
-    | NotarFallBackVoteMsg(BlockReference)
-    | SkipVoteMsg(Slot)
-    | SkipFallbackVoteMsg(Slot)
-    | FinalVoteMsg(Slot)
-
-  /// Messages on the network carry the sender 
-  type NetworkMsg = {
-    sender: ProcessID,
-    msg: Message,
-  }
-  type LocalState = csmi::LocalState[ProcessID, State]
-  type Logging = {}
-  type Transition = csmi::Transition[LocalState, Effect]
-  type Transitions = csmi::Transitions[Transition]
-  type Environment = csmi::Environment[ProcessID, State, Message, TimeoutEventData, Logging, {}]
-  type LocalContext = csmi::LocalContext[Message, TimeoutEventData, {}]
-
-  // ------------------------------------- Data Types ------------------------------------------------
   type Slot = int
 
   type Block = {
@@ -74,6 +46,11 @@ module alpenglow {
 
   type Blockhash = int
 
+  /// Fields are lists indexed by slot
+  type StateFields = {
+    pendingBlocks: List[Option[Block]],
+    state: List[Set[SlotObject]],
+  }
 
   /// Definition 18 (Votor State)
   type SlotObject =
@@ -83,7 +60,22 @@ module alpenglow {
     | BlockNotarized(Blockhash)
     | ItsOver
     | BadWindow
- 
+
+  type ConsensusInput =
+    | BlockInput(Block)
+    | TimeOutInput(Slot)
+    | BlockNotarizedInput(BlockReference)
+    | ParentReadyInput(BlockReference)
+    | SafeToNotarInput(BlockReference)
+    | SafeToSkipInput(Slot)
+
+  /// Table 4 (Alpenglow's voting messages)
+  type MessageContent =
+    | NotarVoteMsg(BlockReference)
+    | NotarFallBackVoteMsg(BlockReference)
+    | SkipVoteMsg(Slot)
+    | SkipFallbackVoteMsg(Slot)
+    | FinalVoteMsg(Slot)
 
   type Certificate =
     | FastFinalizationCertificate(BlockReference)
@@ -92,97 +84,63 @@ module alpenglow {
     | SkipCertificate(Slot)
     | FinalizationCertificate(Slot)
 
-  
-  /// Local state of a process
-  /// Fields are lists indexed by slot
-  type State = {
-    pendingBlocks: List[Option[Block]],
-    state: List[Set[SlotObject]],
+  type TimeoutEvent = Slot
+
+  type CustomEffects = 
+    | ScheduleEventTimeout(TimeoutEvent)
+    | ExcludeTimeout(TimeoutEvent)
+
+  type Extensions = {
+    // blockchain as seen by message soup
+    ch: Slot -> Set[Blockhash],
+    // counter for TLC
+    counter: int,
   }
 
-  // -------------------------------------  State Machine Related Types -------------------------------------
-
-
-  type Bookkeeping
-
-  type Result = {
-    output: Set[Effect],
-    post: LocalState,
+  /// Messages on the network carry the sender (the broadcast call in the pseudo code
+  /// doesn't carry the sender, so does our encoding of the consensus main loop)
+  type Message = {
+    sender: ProcessID,
+    msg: MessageContent,
   }
+
+  /* Boilerplate */
+  type LocalState = choreo::LocalState[ProcessID, StateFields]
+  type LocalContext = choreo::LocalContext[ProcessID, StateFields, Message, TimeoutEvent, Extensions]
+  type Transition = choreo::Transition[ProcessID, StateFields, Message, TimeoutEvent, CustomEffects]
+  type GlobalContext = choreo::GlobalContext[ProcessID, StateFields, Message, TimeoutEvent, Extensions]
+  /* End of boilerplate */
+
+  // -----------------------------------------------------------------------------
+  // Algorithm implementation from alpenglow.qnt
+  // -----------------------------------------------------------------------------
+
+  /// Set of all processes (benevolent and byzantine)
+  pure def allProcesses: Set[ProcessID] = correct.union(good).union(byzantine)
   
-  type ListenerInput = {
-    msgBuffer: Set[NetworkMsg], // Messages received by the process
-    internalBuffer: Set[Slot], // Timeouts for the process
-    now: Slot, // Current slot
-  }
-  
-  type ListenerOutput = Set[Result]
-
-
-
-  
-  // ----------------------------------------------  Constants and utility variables ----------------------------------------------
-
+  /// Set of benevolent processes (correct and good)
+  pure def benevolent: Set[ProcessID] = correct.union(good)
 
   /// Set of all blocks
-  pure val allBlocks = correctBlocks.union(byzantineBlocks)
+  pure def allBlocks: Set[Block] = correctBlocks.union(byzantineBlocks)
 
-  /// Set of correct processes and processes that follow the algorithm but might fail in a benign way
-  pure val benevolent = correct.union(good)
-
-  pure val maxSlot = allBlocks.fold(-1, (s, x) => max(x.slot, s))
-
-  
-  // Definition of byzantine messages
-  pure val byzMessages = tuples(aliveSlots, aliveHashes).map(((slot, hash)) =>
-    Set(
-      NotarVoteMsg({ slot: slot, hash: hash }),
-      NotarFallBackVoteMsg({ slot: slot, hash: hash }),
-      SkipVoteMsg(slot),
-      SkipFallbackVoteMsg(slot),
-      FinalVoteMsg(slot)
+  /// Byzantine network messages that can be injected  
+  pure def byzMessages: Set[Message] = {
+    val allMsgs = aliveSlots.fold(Set(), (acc, slot) =>
+      aliveHashes.fold(acc, (acc2, hash) =>
+        acc2.union(Set(
+          NotarVoteMsg({ slot: slot, hash: hash }),
+          NotarFallBackVoteMsg({ slot: slot, hash: hash }),
+          SkipVoteMsg(slot),
+          SkipFallbackVoteMsg(slot),
+          FinalVoteMsg(slot)
+        ))
+      )
     )
-  ).flatten()
-
-  /// All votes that can be sent by the Byzantine processes
-  pure val byzNetworkMsgs = tuples(byzantine, byzMessages).map(((sender, msg)) =>
-    { sender: sender, msg: msg }
-  )
-  //
-  // Constraints on the number of processes
-  //
-
-  assume uniqueRole = and {
-    correct.intersect(byzantine) == Set(),
-    correct.intersect(good) == Set(),
-    good.intersect(byzantine) == Set(),
+    byzantine.fold(Set(), (acc, p) => 
+      acc.union(allMsgs.map(msg => { sender: p, msg: msg }))
+    )
   }
-
-  pure val numProcesses = correct.size() + good.size() + byzantine.size()
-
-  // Assumption 1 and Assumption 2
-  assume resilienceCondition = all {
-    numProcesses > byzantine.size() * 5, // N > 5F
-    numProcesses > good.size() * 5,
-  }
-
-
-  // ----------------------------------------------  Auxiliary Functions ----------------------------------------------
-
-  /// Checks for thresholds, using the known number of processes
-  pure def surpassesThreshold(votes, threshold) =
-    votes.size() * 100 >= numProcesses * threshold
-
-  pure def slotOf(msg: Message): Slot =
-    match msg {
-      | NotarVoteMsg(m) => m.slot
-      | NotarFallBackVoteMsg(m) => m.slot
-      | SkipVoteMsg(slot) => slot
-      | SkipFallbackVoteMsg(slot) => slot
-      | FinalVoteMsg(slot) => slot
-    }
-
-  pure def reference(b: Block): BlockReference = { slot: b.slot, hash: b.hash }
 
   pure def addObjects(ls: LocalState, slot: Slot, obj: Set[SlotObject]): LocalState =
     { ...ls, state: ls.state.replaceAt(slot, ls.state[slot].union(obj)) }
@@ -190,34 +148,29 @@ module alpenglow {
   pure def setPendingBlock(ls: LocalState, slot: Slot, b: Option[Block]): LocalState =
     { ...ls, pendingBlocks: ls.pendingBlocks.replaceAt(slot, b) }
 
-  /// line 10 of TryNotar. TODO: Is there more to it?
-  pure def firstSlotInLeaderWindow(slot: Slot): bool =
-    slot % 4 == 0 // TODO implement
+  /// Threshold to get a (super)majority
+  pure def threshold: int = (allProcesses.size() * 2) / 3 + 1
 
-  pure def notarizedBlocks(msgs: Set[NetworkMsg]): Set[BlockReference] =
-    msgs
-      .fold(Set(), (s, x) => match x.msg {
-        | NotarVoteMsg(m) => s.union(Set(m))
-        | _ => s
-      })
-      .filter(b => isCertified(NotarizationCertificate(b), msgs))
+  // Helper functions for working with power and voting
+  pure def totalPower: int = allProcesses.fold(0, (acc, p) => acc + power.get(p))
 
-  pure def notarFallbackBlocks(msgs: Set[NetworkMsg]): Set[BlockReference] =
-    msgs
-      .fold(Set(), (s, x) => match x.msg {
-        | NotarVoteMsg(m) => s.union(Set(m))
-        | NotarFallBackVoteMsg(m) => s.union(Set(m))
-        | _ => s
-      })
-      .filter(b => isCertified(NotarFallbackCertificate(b), msgs))
+  pure def powerThreshold: int = (totalPower * 2) / 3 + 1
 
-  pure def slotsSkipCertified(msgs: Set[NetworkMsg]): Set[Slot] =
-    msgs
-      .fold(Set(), (s, x) => match x.msg {
-        | SkipVoteMsg(m) => s.union(Set(m))
-        | _ => s
-      })
-      .filter(s => isCertified(SkipCertificate(s), msgs))
+  pure def powerOfSet(ps: Set[ProcessID]): int = ps.fold(0, (acc, p) => acc + power.get(p))
+
+  pure def surpassesThreshold(ps: Set[ProcessID], percent: int): bool =
+    powerOfSet(ps) * 100 >= totalPower * percent
+
+  pure def reference(b: Block): BlockReference = { slot: b.slot, hash: b.hash }
+
+  pure def slotOf(msg: MessageContent): Slot =
+    match msg {
+      | NotarVoteMsg(m) => m.slot
+      | NotarFallBackVoteMsg(m) => m.slot
+      | SkipVoteMsg(slot) => slot
+      | SkipFallbackVoteMsg(slot) => slot
+      | FinalVoteMsg(slot) => slot
+    }
 
   // Definition 5 (ancestor and descendant). An ancestor of a block b is any
   // block that can be reached from b by the parent links, i.e., b, b’s parent,
@@ -239,14 +192,18 @@ module alpenglow {
     bAncestors.contains(a.hash)
   }
 
+  /// line 10 of TryNotar. TODO: Is there more to it?
+  pure def firstSlotInLeaderWindow(slot: Slot): bool =
+    slot % 4 == 0 // TODO implement
+
   // Definition 13 (certificates)
   // They are defined over a set of messages. Currently we evaluate this over the
   // message soup. But they can be also used over locally received messages if such
   // a semantics is needed.
 
   /// Table 5: Apenglow's certificate messages.
-  pure def isCertified(cert: Certificate, msgs: Set[NetworkMsg]): bool = {
-    pure val aggregatedVotes = msgs.filter(m => {
+  pure def isCertified(cert: Certificate, msgs: Set[Message]): bool = {
+    val aggregatedVotes = msgs.filter(m => {
       match cert {
         | FastFinalizationCertificate(b) =>
           m.msg == NotarVoteMsg(b)
@@ -261,7 +218,7 @@ module alpenglow {
       }
     })
 
-    pure val threshold = match cert {
+    val threshold = match cert {
       | FastFinalizationCertificate => 80
       | NotarizationCertificate => 60
       | NotarFallbackCertificate => 60
@@ -269,15 +226,31 @@ module alpenglow {
       | FinalizationCertificate => 60
     }
 
-    aggregatedVotes.surpassesThreshold(threshold)
+    aggregatedVotes.map(m => m.sender).surpassesThreshold(threshold)
   }
+
+  pure def notarizedBlocks(msgs: Set[Message]): Set[BlockReference] =
+    msgs
+      .fold(Set(), (s, x) => match x.msg {
+        | NotarVoteMsg(m) => s.union(Set(m))
+        | _ => s
+      })
+      .filter(b => isCertified(NotarizationCertificate(b), msgs))
+
+  pure def slotsSkipCertified(msgs: Set[Message]): Set[Slot] =
+    msgs
+      .fold(Set(), (s, x) => match x.msg {
+        | SkipVoteMsg(m) => s.union(Set(m))
+        | _ => s
+      })
+      .filter(s => isCertified(SkipCertificate(s), msgs))
 
   // Definition 14 (finalization). We have two ways to finalize a block:
   // Warning: definitions uses "unique" perhaps unclear in case of more faults
 
   /// If a finalization certificate on slot s is in Pool, the unique notarized block
   /// in slot s is finalized (we call this slow-finalized).
-  pure def finalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
+  pure def finalized(slot: Slot, msgs: Set[Message]): Set[Blockhash] =
     allBlocks.map(b => b.reference())
       .filter(b => b.slot == slot)
       .filter(b => {
@@ -288,7 +261,7 @@ module alpenglow {
 
   /// If a fast-finalization certificate on block b is in Pool, the block b is
   /// finalized (fast-finalized).
-  pure def fastFinalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
+  pure def fastFinalized(slot: Slot, msgs: Set[Message]): Set[Blockhash] =
     allBlocks.map(b => b.reference())
       .filter(b => b.slot == slot)
       .filter(b => isCertified(FastFinalizationCertificate(b), msgs))
@@ -307,14 +280,14 @@ module alpenglow {
     else
       Set(slot - 3, slot - 2, slot - 1, slot)
 
-  pure def setTimeouts(ls: LocalState, slot: Slot): Result =
-    { post: ls,
-      output: windowSlots(slot).map(i => (ScheduleEventTimeout(i))) }
+  pure def setTimeouts(ls: LocalState, slot: Slot): Transition =
+    { post_state: ls,
+      effects: windowSlots(slot).map(i => choreo::CustomEffect(ScheduleEventTimeout(i))) }
 
   /// Check if a notarization vote can be cast
-  pure def tryNotar(ls: LocalState, b: Block): { result: Result, success: bool } =
+  pure def tryNotar(ls: LocalState, b: Block): { result: Transition, success: bool } =
     if (ls.state[b.slot].contains(Voted))
-      { result: { post: ls, output: Set() }, success: false }
+      { result: { post_state: ls, effects: Set() }, success: false }
     else
       val firstSlot = firstSlotInLeaderWindow(b.slot)
       if ((firstSlot and ParentReady(b.parent).in(ls.state[b.slot]))
@@ -322,57 +295,58 @@ module alpenglow {
         // Warning: parentheses not matching in paper
 
         // Notarization vote
-        val out = Set(Broadcast(NotarVoteMsg({ slot:b.slot, hash: b.hash })))
-        val s2 = ls
-          .addObjects(b.slot, Set(Voted, VotedNotar(b.hash)))
-          // Won't vote notar a second time
+        val out = Set(choreo::Broadcast(
+          { sender: ls.process_id, msg: NotarVoteMsg({ slot:b.slot, hash: b.hash }) }
+        ))
+        val s2 = addObjects(ls, b.slot, Set(Voted, VotedNotar(b.hash)))
           .setPendingBlock(b.slot, None)
 
         // Maybe vote finalize as well
         val tf = tryFinal(s2, b.slot, b.hash)
 
-        { result: { post: tf.post, output: out.union(tf.output) }, success: true }
+        { result: { post_state: tf.post_state, effects: out.union(tf.effects) }, success: true }
       else
-        { result: { post: ls, output: Set() }, success: false }
+        { result: { post_state: ls, effects: Set() }, success: false }
 
-  pure def tryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Result =
+  pure def tryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Transition =
     if (BlockNotarized(hash).in(ls.state[slot]) and VotedNotar(hash).in(ls.state[slot])
         and not(BadWindow.in(ls.state[slot])))
       // Finalization vote
-      { output: Set(Broadcast(FinalVoteMsg(slot))), post: ls.addObjects(slot, Set(ItsOver)) }
+      {
+        effects: Set(choreo::Broadcast({ sender: ls.process_id, msg: FinalVoteMsg(slot) })),
+        post_state: addObjects(ls, slot, Set(ItsOver))
+      }
     else
-      { output: Set(), post: ls }
+      { effects: Set(), post_state: ls }
 
-  pure def trySkipWindow(ls: LocalState, slot: Slot): Result =
+  pure def trySkipWindow(ls: LocalState, slot: Slot): Transition =
     // Skip unvoted slots
-    windowSlots(slot).fold({ output: Set(), post: ls }, (s, k) => {
-      if (not(Voted.in(s.post.state[k])))
+    windowSlots(slot).fold({ effects: Set(), post_state: ls }, (s, k) => {
+      if (not(Voted.in(s.post_state.state[k])))
         // Skip vote
-        val update = Set(Broadcast(SkipVoteMsg(k)))
-        val s2 = s.post
-          .addObjects(k, Set(Voted, BadWindow))
-          // Won't vote notar after skip
+        val update = Set(choreo::Broadcast({ sender: ls.process_id, msg: SkipVoteMsg(k) }))
+        val s2 = addObjects(s.post_state, k, Set(Voted, BadWindow))
           .setPendingBlock(k, None)
 
-        { output: s.output.union(update), post: s2 }
+        { effects: s.effects.union(update), post_state: s2 }
       else
         s
     })
 
-  pure def checkPendingBlocks(ls: LocalState): Result =
+  pure def checkPendingBlocks(ls: LocalState): Transition =
     // Iterate with increasing slot
     // (left to right)
-    ls.pendingBlocks.foldl({ output: Set(), post: ls }, (res, pendingBlock) =>
+    ls.pendingBlocks.foldl({ effects: Set(), post_state: ls }, (res, pendingBlock) =>
       match pendingBlock {
         | Some(b) =>
-          val tn = tryNotar(res.post, b)
-          { output: res.output.union(tn.result.output), post: tn.result.post } // TODO implement
+          val tn = tryNotar(res.post_state, b)
+          { effects: res.effects.union(tn.result.effects), post_state: tn.result.post_state }
         | None =>
           res
       }
     )
 
-  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): bool = all {
+  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[Message]): bool = all {
     firstSlotInLeaderWindow(slot),
     0.to(slot - 1).exists(s =>
       val b = { slot: s, hash: hash }
@@ -386,15 +360,14 @@ module alpenglow {
     )
   }
   
-  pure def votedToSkip(s: Slot, msgs: Set[NetworkMsg]): Set[ProcessID] =
+  pure def votedToSkip(s: Slot, msgs: Set[Message]): Set[ProcessID] =
     msgs.filter(m =>  m.msg == SkipVoteMsg(s)).map(m => m.sender)
 
   // Warning: vote doesn't contain parent. Assumption about parent hashed in hash?
-  pure def votedToNotar(b: BlockReference, msgs: Set[NetworkMsg]): Set[ProcessID] =
+  pure def votedToNotar(b: BlockReference, msgs: Set[Message]): Set[ProcessID] =
     msgs.filter(m => m.msg == NotarVoteMsg(b)).map(m => m.sender)
 
-  
-  def safeToNotarCondition(v: ProcessID, msgs: Set[NetworkMsg], now: Slot, b: Block): bool = all {
+  pure def safeToNotarCondition(v: ProcessID, msgs: Set[Message], now: Slot, b: Block): bool = all {
     // Consider block b in slot s = slot(b).
     b.slot == now,
 
@@ -422,7 +395,7 @@ module alpenglow {
     }
   }
 
-  def safeToSkipCondition(v: ProcessID,  allMessages: Set[NetworkMsg], now: Slot): bool = all {
+  pure def safeToSkipCondition(v: ProcessID, allMessages: Set[Message], now: Slot): bool = all {
     // node voted in slot s already, but not to skip s.
     allMessages.exists(m =>
       m.sender == v
@@ -467,153 +440,385 @@ module alpenglow {
       .surpassesThreshold(40)
   }
 
-//----------------------------------------------------- Event Listeners -----------------------------------------------------
+  // -----------------------------------------------------------------------------
+  // Listeners (Algorithm 1)
+  // -----------------------------------------------------------------------------
 
-  /// Emit Block and process it
-  /// Warning: The pseudo code uses s. Does this mean s is checked against the local
-  /// view of the slot, and thus only "current" blocks can be received, or could BlockInput(block)
-  /// could also be executed for blocks from future slots?
-  /// This question applies to all "upon"s
-  pure def blockReceived(
-    ls: LocalState,
-    input: ListenerInput
-  ): ListenerOutput =
-    
-    val now = input.now
-    val candidates = allBlocks.filter(b => b.slot == now)
-    
-    val results = candidates.map(b => {
-        // If the block is not in the pending blocks, we add it
-        val tn = tryNotar(ls, b) // looks like a function but has two side effects: changes state and broadcasts
-        if (tn.success)
-          val cpb = checkPendingBlocks(tn.result.post)
-          // as tryNotar changed the local state, we pass it to checkPendingBlocks
-          { post: cpb.post, output: cpb.output.union(tn.result.output) }
-          // both, tryNotar and checkPendingBlocks have side effects of sending messages. Thus we build the union here.
-        else if (not(Voted.in(tn.result.post.state[b.slot])))
-          { output: tn.result.output, post: tn.result.post.setPendingBlock(b.slot, Some(b)) }
-        else
-          // Even if all if conditions evaluate to false, tryNotar may have side effects and may change the local state
-          { output: tn.result.output, post: tn.result.post } // Warning: The state might have changed
-    })
-    results 
-      
-  pure def timeout(
-    ls: LocalState,
-    input: ListenerInput
-  ): ListenerOutput =
-    val slot = input.now
-    val timeouts = input.internalBuffer
+  /// Listen for block input
+  pure def listen_block_inputs(ctx: LocalContext): Set[Transition] = {
+    val availableBlocks = allBlocks.filter(b => aliveSlots.contains(b.slot))
 
-    val condition = timeouts.contains(slot)
-    if (not(condition))
+    availableBlocks.map(b => upon_block_input(ctx, b))
+  }
+
+  pure def upon_block_input(ctx: LocalContext, b: Block): Transition = {
+    val tn = tryNotar(ctx.state, b) // looks like a function but has two side effects: changes state and broadcasts
+    if (tn.success)
+      val cpb = checkPendingBlocks(tn.result.post_state)
+      // as tryNotar changed the local state, we pass it to checkPendingBlocks
+      { post_state: cpb.post_state, effects: cpb.effects.union(tn.result.effects) }
+      // both, tryNotar and checkPendingBlocks have side effects of sending messages. Thus we build the union here.
+    else if (not(Voted.in(tn.result.post_state.state[b.slot])))
+      { post_state: setPendingBlock(tn.result.post_state, b.slot, Some(b)), effects: tn.result.effects }
+    else
+      // Even if all if conditions evaluate to false, tryNotar may have side effects and may change the local state
+      tn.result
+  }
+
+  /// Listen for timeout events
+  pure def listen_timeouts(ctx: LocalContext): Set[Transition] = {
+    val activeTimeouts = ctx.events
+    aliveSlots.filter(slot => activeTimeouts.contains(slot)).map(s => upon_timeout(ctx, s))
+  }
+
+  pure def upon_timeout(ctx: LocalContext, slot: Slot): Transition = {
+    val ls = ctx.state
+
+    if (not(Voted.in(ls.state[slot])))
+      trySkipWindow(ls, slot)
+    else
       // No change state, no messages sent
-      Set({ output: Set(), post: ls })
+      { effects: Set(), post_state: ls }
+  }
+
+  /// Listen for block notarized events
+  pure def listen_block_notarized(ctx: LocalContext): Set[Transition] = {
+    val notarizedBlocks = allBlocks.filter(b =>
+      isCertified(NotarizationCertificate({ slot: b.slot, hash: b.hash }), ctx.messages) and
+      aliveSlots.contains(b.slot)
+    )
+
+    notarizedBlocks.map(block => upon_block_notarized(ctx, block.slot, block.hash))
+  }
+
+  pure def upon_block_notarized(ctx: LocalContext, slot: Slot, hash: Blockhash): Transition = {
+    val s1 = addObjects(ctx.state, slot, Set(BlockNotarized(hash)))
+    tryFinal(s1, slot, hash)
+  }
+
+  /// Listen for parent ready events
+  pure def listen_parent_ready(ctx: LocalContext): Set[Transition] = {
+    val readyBlocks = allBlocks.filter(b =>
+      aliveSlots.contains(b.slot) and
+      parentReadyCondition(b.slot, b.hash, ctx.messages)
+    )
+
+    readyBlocks.map(block => upon_parent_ready(ctx, block.slot, block.hash))
+  }
+
+  pure def upon_parent_ready(ctx: LocalContext, slot: Slot, hash: Blockhash): Transition = {
+    val r1 =
+      addObjects(ctx.state, slot, Set(ParentReady(hash)))
+        .checkPendingBlocks()
+    // Start time for all slots in this window
+    val r2 = setTimeouts(r1.post_state, slot)
+    { effects: r1.effects.union(r2.effects), post_state: r2.post_state }
+  }
+
+  /// Listen for safe to notar events
+  pure def listen_safe_to_notar(ctx: LocalContext): Set[Transition] = {
+    val safeBlocks = allBlocks.filter(b =>
+      aliveSlots.contains(b.slot) and
+      safeToNotarCondition(ctx.state.process_id, ctx.messages, b.slot, b)
+    )
+
+    safeBlocks.map(block => upon_safe_to_notar(ctx, block.slot, block.hash))
+  }
+
+  pure def upon_safe_to_notar(ctx: LocalContext, slot: Slot, hash: Blockhash): Transition = {
+    val s1 = trySkipWindow(ctx.state, slot)
+    if (not(ItsOver.in(s1.post_state.state[slot])))
+      // Notar-fallback vote
+      val effects = s1.effects.union(
+        Set(choreo::Broadcast({
+          sender: ctx.state.process_id,
+          msg: NotarFallBackVoteMsg({ slot: slot, hash: hash })
+        }))
+      )
+      { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
     else
-      // If the timeout is set, we try to skip the window
-      // We assume that the timeout is set for the current slot
-      val candidate =  if (Voted.in(ls.state[slot]))
-          trySkipWindow(ls, slot)
-        else
-          // No change state, no messages sent
-          {output: Set(), post: ls }
-      Set(candidate)
+      s1
+  }
 
+  /// Listen for safe to skip events
+  pure def listen_safe_to_skip(ctx: LocalContext): Set[Transition] =
+    val safeSlots = aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, ctx.messages, slot))
+    safeSlots.map(slot => upon_safe_to_skip(ctx, slot))
 
-  /// Emit BlockNotarized and process it. The structure of this actions is that we first
-  /// build a set of data (blocks or slot numbers) for which a certain event is enabled,
-  /// and then we pick one non-deterministically, process it, and updated the global state.
-  pure def blockNotarized(
-    ls: LocalState,
-    input: ListenerInput
-  ): ListenerOutput =
-    val msgs = input.msgBuffer
-    val candidates = allBlocks.map(b => {slot: input.now, hash: b.hash})
-              .filter(nc => isCertified(NotarizationCertificate(nc),msgs))
-    candidates.map(sh => {
-          val s1 = ls.addObjects(sh.slot, Set(BlockNotarized(sh.hash)))
-          tryFinal(s1, sh.slot, sh.hash)
-      }
-    )
-
-
-  // • ParentReady(s, hash(b)): Slot s is the first of its leader window, and Pool
-  // holds a notarization or notar-fallback certificate for a previous block b,
-  // and skip certificates for every slot s′ since b, i.e., for slot(b) < s′ < s.
-  // Warning "notarization or notar-fallback": notar-fallback seems to imply notar
-  // Warning: Previous block? Block for previous slot
-  /// Emit ParentReady and process it
-  pure def parentReady(
-    ls: LocalState,
-    input: ListenerInput
-  ): ListenerOutput =
-    val msgs = input.msgBuffer
-    val now = input.now
-    val candidates = allBlocks.filter(b => parentReadyCondition(now, b.hash, msgs))
-
-    candidates.map(sh => {
-        val s1 = ls.addObjects(sh.slot, Set(ParentReady(sh.hash)))
-        val s2 = checkPendingBlocks(s1)
-        // Start time for all slots in this window
-        val s3 = setTimeouts(s2.post, sh.slot)
-        { output: s2.output.union(s3.output), post: s2.post }
-      }
-    )
-
-
-  /// Definition 16 (fallback events)
-  // Emit SafeToNotar and process it
-  pure def safeToNotar(
-    ls: LocalState,
-    input: ListenerInput
-  ): ListenerOutput =
-    val msgs = input.msgBuffer
-    val now = input.now
-    val candidates = allBlocks.filter(b => safeToNotarCondition(ls.pid, msgs, now, b))
-                        .map(b => {slot: b.slot, hash: b.hash})
-    candidates.map(sh => {
-        val s1 = trySkipWindow(ls, sh.slot)
-        if (not(ItsOver.in(s1.post.state[sh.slot])))
-          // Notar-fallback vote
-          val output = s1.output.union(Set(Broadcast(NotarFallBackVoteMsg(sh))))
-          { output: output, post: s1.post.addObjects(sh.slot, Set(BadWindow)) }
-        else
-          s1
-      }
-    )
-  
-  // Emit SafeToSkip and process it
-  pure def safeToSkip(
-    ls: LocalState,
-    input: ListenerInput
-  ): ListenerOutput =
-    val slot = input.now
-    val msgs = input.msgBuffer
-    val condition = safeToSkipCondition(ls.pid, msgs, slot)
-    if (not(condition))
-      Set()
+  pure def upon_safe_to_skip(ctx: LocalContext, slot: Slot): Transition = {
+    val s1 = trySkipWindow(ctx.state, slot)
+    if (not(ItsOver.in(s1.post_state.state[slot])))
+      // Skip-fallback vote
+      val effects = s1.effects.union(
+        Set(choreo::Broadcast({ sender: ctx.state.process_id, msg: SkipFallbackVoteMsg(slot) }))
+      )
+      { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
     else
-      val candidate = {
-          val s1 = trySkipWindow(ls, slot)
-          if (not(ItsOver.in(s1.post.state[slot])))
-            // Skip-fallback vote
-            val output = s1.output.union(Set(Broadcast(SkipFallbackVoteMsg(slot))))
-            { output: output, post: addObjects(s1.post, slot, Set(BadWindow)) }
-          else
-            s1
+      s1
+  }
+
+  /// Main listener combining all event handlers
+  pure def main_listener(ctx: LocalContext): Set[Transition] =
+    Set(
+      listen_block_inputs(ctx),
+      listen_timeouts(ctx),
+      listen_block_notarized(ctx),
+      listen_parent_ready(ctx),
+      listen_safe_to_notar(ctx),
+      listen_safe_to_skip(ctx)
+    ).flatten()
+
+  // -----------------------------------------------------------------------------
+  // Choreo integration (init and step actions)
+  // -----------------------------------------------------------------------------
+
+  /// Initialize process state
+  pure def initialize_process(process: ProcessID): LocalState = {
+    // preload state for 5 slots
+    pure val slots = 0.to(4)
+    {
+      process_id: process,
+      pendingBlocks: slots.fold([], (acc, _) => acc.append(None)),
+      state: slots.fold([], (acc, slot) => 
+        if (slot == 0) {
+          acc.append(Set(ParentReady(-1)))
+        } else {
+          acc.append(Set())
         }
-      Set(candidate)
+      )
+    }
+  }
 
+  /// Initial extensions state
+  pure def initial_extensions: Extensions = {
+    ch: aliveSlots.mapBy(s => Set()),
+    counter: 0
+  }
 
-  pure def listener(ls: LocalState, input: ListenerInput): ListenerOutput = 
-    val res = Set(
-      blockReceived(ls, input),
-      timeout(ls, input),
-      blockNotarized(ls, input),
-      parentReady(ls, input),
-      safeToNotar(ls, input),
-      safeToSkip(ls, input)
-    ).flatten().filter(out => out.output.size() > 0 or out.post != ls) // Flatten the set of sets into a single set of results
-    res
+  action init = choreo::init({
+    system: benevolent.mapBy(n => initialize_process(n)),
+    messages: benevolent.mapBy(n => byzMessages),
+    events: benevolent.mapBy(n => Set(0)), // initial timeout for slot 0
+    extensions: initial_extensions
+  })
 
+  action step = choreo::step(
+    main_listener,
+    (c, _) => c,
+    (e, p) => e
+  )
+
+  // -----------------------------------------------------------------------------
+  // Invariants and properties
+  // -----------------------------------------------------------------------------
+
+  val s = choreo::s
+
+  /// Auxiliary definition to fetch all messages
+  val allMessages = s.messages.values().flatten()
+
+  /// Agreement: no two correct processes decide on different values for the same slot
+  //
+  val agreement =
+    aliveSlots.forall(slot => finalized(slot, allMessages).size() <= 1)
+
+  val fastAgreement =
+    aliveSlots.forall(slot => fastFinalized(slot, allMessages).union(finalized(slot, allMessages)).size() <= 1)
+
+  // Witness was used to find bug in safeToNotar encoding
+  val noBad =
+    benevolent.forall(v => not(s.system.get(v).state[1].contains(BadWindow)))
+
+  /// Witness to find a run where a block is fast finalized
+  val fastFinalizedWitness =
+    allBlocks.forall(b => not(isCertified(FastFinalizationCertificate(b.reference()), allMessages)))
+
+  /// Witness to find a run where a timeout is started
+  val timeoutWitness =
+     s.events.values().forall(v => v == Set())
+
+  /// Theorem 1 (safety). If any correct node finalizes a block b in slot s and any
+  /// correct node finalizes any block b′ in any slot s′ ≥ s, b′ is a descendant of b.
+  val safety = tuples(aliveSlots, allBlocks).forall(((slot, block)) => {
+    val finalizedAtSlot = finalized(slot, allMessages)
+    block.hash.in(finalizedAtSlot) implies tuples(
+      aliveSlots.filter(s2 => s2 >= slot), allBlocks).forall(((slot2, block2)) => {
+      block2.hash.in(finalized(slot2, allMessages)) implies block2.isDescendant(block)
+    })
+  })
+
+  /// This generates example traces where a block is finalized after some empty slots
+  /// increase max steps to approx 100.
+  val emptySlotsWitness =
+    aliveSlots.forall(s1 =>
+      aliveSlots.forall(s2 =>
+        s1 < s2 implies
+      s.extensions.ch.get(s1).size() >= s.extensions.ch.get(s2).size()))
+
+  /// This generates example traces where every slot is finalized
+  /// increase max steps to approx 100.
+  val noEmptySlotsWitness =
+    aliveSlots.exists(s1 =>
+      s.extensions.ch.get(s1).size() == 0)
+
+  // TODO finalize ancestors locally
+
+  // -----------------------------------------------------------------------------
+  // Setup for runs
+  // -----------------------------------------------------------------------------
+
+  action step_with(v: ProcessID, listener: LocalContext => Set[Transition]): bool =
+    choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
+
+  action receiveSpecificBlock(v: ProcessID, b: Block): bool = all {
+    allBlocks.contains(b),
+    step_with(v, (ctx) => Set(upon_block_input(ctx, b)))
+  }
+}
+
+module some_byz {
+  // For a trace where a value is fast finalized call
+  // quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness
+  import alpenglow(
+    correct = Set("v1", "v2", "v3", "v4", "v5"),
+    good = Set(),
+    byzantine = Set("b1"),
+    power = Set("v1", "v2", "v3", "v4", "v5", "b1").mapBy(_ => 1),
+    correctBlocks = Set(
+      { slot: 0, hash: 42, parent: -1 },
+      { slot: 1, hash: 43, parent: 42 },
+      { slot: 2, hash: 44, parent: 43 },
+    ),
+    byzantineBlocks = Set(
+      { slot: 1, hash: 46, parent: 42 },
+      { slot: 1, hash: 47, parent: 45 },
+      { slot: 2, hash: 48, parent: 43 },
+      { slot: 2, hash: 49, parent: 45 },
+    ),
+    aliveSlots = 0.to(2),
+    aliveHashes = 42.to(49),
+  ).*
+
+  run ffTest =
+    init
+    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v3", { hash: 42, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v4", { hash: 42, parent: -1, slot: 0 }))
+    .expect(fastFinalized(0, allMessages) == Set(42))
+}
+
+module some_byz_vp {
+  // For a trace where a value is fast finalized call
+  // quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness
+  import alpenglow(
+    correct = Set("v1", "v2"),
+    good = Set(),
+    byzantine = Set("b1"),
+    power = Map("v1" -> 3, "v2" -> 2, "b1"-> 1),
+    correctBlocks = Set(
+      { slot: 0, hash: 42, parent: -1 },
+      { slot: 1, hash: 43, parent: 42 },
+      { slot: 2, hash: 44, parent: 43 },
+    ),
+    byzantineBlocks = Set(
+      { slot: 1, hash: 46, parent: 42 },
+      { slot: 1, hash: 47, parent: 45 },
+      { slot: 2, hash: 48, parent: 43 },
+      { slot: 2, hash: 49, parent: 45 },
+    ),
+    aliveSlots = 0.to(2),
+    aliveHashes = 42.to(49),
+  ).*
+
+  run ffTest =
+    init
+    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+    .expect(fastFinalized(0, allMessages) == Set(42))
+}
+
+module too_many_byz_1 {
+  // to violate agreement, run
+  // quint run alpenglow.qnt --main too_many_byz_1 --invariant agreement
+
+  import alpenglow(
+    correct = Set("v1", "v2", "v3", "v4"),
+    good = Set(),
+    byzantine = Set("b1"),
+    power = Set("v1", "v2", "v3", "v4", "b1").mapBy(_ => 1),
+    correctBlocks = Set(
+      { slot: 0, hash: 42, parent: -1 },
+      { slot: 1, hash: 43, parent: 42 },
+      { slot: 2, hash: 44, parent: 43 },
+    ),
+    byzantineBlocks = Set(
+      { slot: 0, hash: 45, parent: -1 },
+      { slot: 1, hash: 46, parent: 42 },
+      { slot: 1, hash: 47, parent: 45 },
+      { slot: 2, hash: 48, parent: 43 },
+      { slot: 2, hash: 49, parent: 45 },
+    ),
+    aliveSlots = 0.to(2),
+    aliveHashes = 42.to(49),
+  ).*
+}
+
+module too_many_byz {
+  import basicSpells.* from "../../spells/basicSpells"
+
+  // to violate agreement, run
+  // quint run alpenglow.qnt --main too_many_byz --step oneSlotNoTimeout --invariant agreement
+
+  import alpenglow(
+    correct = Set("v1", "v2", "v3", "v4"),
+    good = Set(),
+    byzantine = Set("b1", "b2"),
+    power = Set("v1", "v2", "v3", "v4", "b1", "b2").mapBy(_ => 1),
+    correctBlocks = Set({ slot: 0, hash: 42, parent: -1 }),
+    byzantineBlocks = Set({ slot: 0, hash: 41, parent: -1 }),
+    aliveSlots = Set(0),
+    aliveHashes = 41.to(42),
+  ).*
+
+  run disagreementTest =
+    init
+    .then(receiveSpecificBlock("v3", { hash: 41, parent: -1, slot: 0 }))
+    .then(receiveSpecificBlock("v4", { hash: 41, parent: -1, slot: 0 }))
+
+    .expect(
+      Set(
+        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" },
+      ).subseteq(allMessages)
+    )
+
+    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+    .then(step_with("v3", (ctx) => Set(upon_block_notarized(ctx, 0, 41))))
+    .then(step_with("v4", (ctx) => Set(upon_block_notarized(ctx, 0, 41))))
+    .expect(
+      Set(
+        { msg: FinalVoteMsg(0), sender: "v3" },
+        { msg: FinalVoteMsg(0), sender: "v4" }
+      ).subseteq(allMessages)
+    )
+
+    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+    .expect(not(agreement))
+    .expect(
+      Set(
+        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" },
+        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b1" },
+        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b2" },
+        { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v1" },
+        { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v2" },
+        { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b1" },
+        { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b2" },
+        { msg: FinalVoteMsg(0), sender: "v3" },
+        { msg: FinalVoteMsg(0), sender: "v4" },
+        { msg: FinalVoteMsg(0), sender: "b1" },
+        { msg: FinalVoteMsg(0), sender: "b2" }
+      ).subseteq(allMessages)
+    )
 }
