@@ -678,9 +678,7 @@ module alpenglow {
 
 module some_byz {
   // For a trace where a value is fast finalized call
-  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness
-  // Same but one process reached ItsOver
-  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness  --seed=0x11fa3a6ddd2666
+  // quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness
   import alpenglow(
     correct = Set("v1", "v2", "v3", "v4", "v5"),
     good = Set(),
@@ -708,15 +706,11 @@ module some_byz {
     .then(receiveSpecificBlock("v3", { hash: 42, parent: -1, slot: 0 }))
     .then(receiveSpecificBlock("v4", { hash: 42, parent: -1, slot: 0 }))
     .expect(fastFinalized(0, allMessages) == Set(42))
-
 }
-
 
 module some_byz_vp {
   // For a trace where a value is fast finalized call
-  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness
-  // Same but one process reached ItsOver
-  // quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness  --seed=0x11fa3a6ddd2666
+  // quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness
   import alpenglow(
     correct = Set("v1", "v2"),
     good = Set(),
@@ -746,7 +740,7 @@ module some_byz_vp {
 
 module too_many_byz_1 {
   // to violate agreement, run
-  // quint run statemachine.qnt --main too_many_byz_1 --step oneSlotNoTimeout  --invariant agreement
+  // quint run alpenglow.qnt --main too_many_byz_1 --invariant agreement
 
   import alpenglow(
     correct = Set("v1", "v2", "v3", "v4"),
@@ -774,7 +768,7 @@ module too_many_byz {
   import basicSpells.* from "../../spells/basicSpells"
 
   // to violate agreement, run
-  // quint run statemachine.qnt --main too_many_byz --step oneSlotNoTimeout --invariant agreement
+  // quint run alpenglow.qnt --main too_many_byz --step oneSlotNoTimeout --invariant agreement
 
   import alpenglow(
     correct = Set("v1", "v2", "v3", "v4"),
