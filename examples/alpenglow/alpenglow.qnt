@@ -70,7 +70,7 @@ module alpenglow {
     | SafeToSkipInput(Slot)
 
   /// Table 4 (Alpenglow's voting messages)
-  type Message =
+  type MessageContent =
     | NotarVoteMsg(BlockReference)
     | NotarFallBackVoteMsg(BlockReference)
     | SkipVoteMsg(Slot)
@@ -91,10 +91,6 @@ module alpenglow {
     | ExcludeTimeout(TimeoutEvent)
 
   type Extensions = {
-    // Messages sent so far, a.k.a. the message soup
-    msgBuffer: Set[NetworkMsg],
-    // Started timeouts per process
-    activeTimeouts: ProcessID -> Set[TimeoutEvent],
     // blockchain as seen by message soup
     ch: Slot -> Set[Blockhash],
     // counter for TLC
@@ -103,9 +99,9 @@ module alpenglow {
 
   /// Messages on the network carry the sender (the broadcast call in the pseudo code
   /// doesn't carry the sender, so does our encoding of the consensus main loop)
-  type NetworkMsg = {
+  type Message = {
     sender: ProcessID,
-    msg: Message,
+    msg: MessageContent,
   }
 
   /* Boilerplate */
@@ -129,7 +125,7 @@ module alpenglow {
   pure def allBlocks: Set[Block] = correctBlocks.union(byzantineBlocks)
 
   /// Byzantine network messages that can be injected  
-  pure def byzNetworkMsgs: Set[NetworkMsg] = {
+  pure def byzMessages: Set[Message] = {
     val allMsgs = aliveSlots.fold(Set(), (acc, slot) =>
       aliveHashes.fold(acc, (acc2, hash) =>
         acc2.union(Set(
@@ -167,7 +163,7 @@ module alpenglow {
 
   pure def reference(b: Block): BlockReference = { slot: b.slot, hash: b.hash }
 
-  pure def slotOf(msg: Message): Slot =
+  pure def slotOf(msg: MessageContent): Slot =
     match msg {
       | NotarVoteMsg(m) => m.slot
       | NotarFallBackVoteMsg(m) => m.slot
@@ -186,7 +182,7 @@ module alpenglow {
   // a semantics is needed.
 
   /// Table 5: Apenglow's certificate messages.
-  pure def isCertified(cert: Certificate, msgs: Set[NetworkMsg]): bool = {
+  pure def isCertified(cert: Certificate, msgs: Set[Message]): bool = {
     val aggregatedVotes = msgs.filter(m => {
       match cert {
         | FastFinalizationCertificate(b) =>
@@ -213,7 +209,7 @@ module alpenglow {
     aggregatedVotes.map(m => m.sender).surpassesThreshold(threshold)
   }
 
-  pure def notarizedBlocks(msgs: Set[NetworkMsg]): Set[BlockReference] =
+  pure def notarizedBlocks(msgs: Set[Message]): Set[BlockReference] =
     msgs
       .fold(Set(), (s, x) => match x.msg {
         | NotarVoteMsg(m) => s.union(Set(m))
@@ -221,7 +217,7 @@ module alpenglow {
       })
       .filter(b => isCertified(NotarizationCertificate(b), msgs))
 
-  pure def slotsSkipCertified(msgs: Set[NetworkMsg]): Set[Slot] =
+  pure def slotsSkipCertified(msgs: Set[Message]): Set[Slot] =
     msgs
       .fold(Set(), (s, x) => match x.msg {
         | SkipVoteMsg(m) => s.union(Set(m))
@@ -234,7 +230,7 @@ module alpenglow {
 
   /// If a finalization certificate on slot s is in Pool, the unique notarized block
   /// in slot s is finalized (we call this slow-finalized).
-  pure def finalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
+  pure def finalized(slot: Slot, msgs: Set[Message]): Set[Blockhash] =
     allBlocks.map(b => b.reference())
       .filter(b => b.slot == slot)
       .filter(b => {
@@ -245,7 +241,7 @@ module alpenglow {
 
   /// If a fast-finalization certificate on block b is in Pool, the block b is
   /// finalized (fast-finalized).
-  pure def fastFinalized(slot: Slot, msgs: Set[NetworkMsg]): Set[Blockhash] =
+  pure def fastFinalized(slot: Slot, msgs: Set[Message]): Set[Blockhash] =
     allBlocks.map(b => b.reference())
       .filter(b => b.slot == slot)
       .filter(b => isCertified(FastFinalizationCertificate(b), msgs))
@@ -279,7 +275,9 @@ module alpenglow {
         // Warning: parentheses not matching in paper
 
         // Notarization vote
-        val out = Set(choreo::Broadcast(NotarVoteMsg({ slot:b.slot, hash: b.hash })))
+        val out = Set(choreo::Broadcast(
+          { sender: ls.process_id, msg: NotarVoteMsg({ slot:b.slot, hash: b.hash }) }
+        ))
         val s2 = addObjects(ls, b.slot, Set(Voted, VotedNotar(b.hash)))
           .setPendingBlock(b.slot, None)
 
@@ -294,7 +292,10 @@ module alpenglow {
     if (BlockNotarized(hash).in(ls.state[slot]) and VotedNotar(hash).in(ls.state[slot])
         and not(BadWindow.in(ls.state[slot])))
       // Finalization vote
-      { effects: Set(choreo::Broadcast(FinalVoteMsg(slot))), post_state: addObjects(ls, slot, Set(ItsOver)) }
+      {
+        effects: Set(choreo::Broadcast({ sender: ls.process_id, msg: FinalVoteMsg(slot) })),
+        post_state: addObjects(ls, slot, Set(ItsOver))
+      }
     else
       { effects: Set(), post_state: ls }
 
@@ -303,7 +304,7 @@ module alpenglow {
     windowSlots(slot).fold({ effects: Set(), post_state: ls }, (s, k) => {
       if (not(Voted.in(s.post_state.state[k])))
         // Skip vote
-        val update = Set(choreo::Broadcast(SkipVoteMsg(k)))
+        val update = Set(choreo::Broadcast({ sender: ls.process_id, msg: SkipVoteMsg(k) }))
         val s2 = addObjects(s.post_state, k, Set(Voted, BadWindow))
           .setPendingBlock(k, None)
 
@@ -325,7 +326,7 @@ module alpenglow {
       }
     )
 
-  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[NetworkMsg]): bool = all {
+  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[Message]): bool = all {
     firstSlotInLeaderWindow(slot),
     0.to(slot - 1).exists(s =>
       val b = { slot: s, hash: hash }
@@ -339,14 +340,14 @@ module alpenglow {
     )
   }
   
-  pure def votedToSkip(s: Slot, msgs: Set[NetworkMsg]): Set[ProcessID] =
+  pure def votedToSkip(s: Slot, msgs: Set[Message]): Set[ProcessID] =
     msgs.filter(m =>  m.msg == SkipVoteMsg(s)).map(m => m.sender)
 
   // Warning: vote doesn't contain parent. Assumption about parent hashed in hash?
-  pure def votedToNotar(b: BlockReference, msgs: Set[NetworkMsg]): Set[ProcessID] =
+  pure def votedToNotar(b: BlockReference, msgs: Set[Message]): Set[ProcessID] =
     msgs.filter(m => m.msg == NotarVoteMsg(b)).map(m => m.sender)
 
-  pure def safeToNotarCondition(v: ProcessID, msgs: Set[NetworkMsg], now: Slot, b: Block): bool = all {
+  pure def safeToNotarCondition(v: ProcessID, msgs: Set[Message], now: Slot, b: Block): bool = all {
     // Consider block b in slot s = slot(b).
     b.slot == now,
 
@@ -374,7 +375,7 @@ module alpenglow {
     }
   }
 
-  pure def safeToSkipCondition(v: ProcessID, allMessages: Set[NetworkMsg], now: Slot): bool = all {
+  pure def safeToSkipCondition(v: ProcessID, allMessages: Set[Message], now: Slot): bool = all {
     // node voted in slot s already, but not to skip s.
     allMessages.exists(m =>
       m.sender == v
@@ -457,7 +458,9 @@ module alpenglow {
         val s1 = trySkipWindow(ls, sh.slot)
         if (not(ItsOver.in(s1.post_state.state[sh.slot])))
           // Notar-fallback vote
-          val effects = s1.effects.union(Set(choreo::Broadcast(NotarFallBackVoteMsg(sh))))
+          val effects = s1.effects.union(
+            Set(choreo::Broadcast({ sender: ls.process_id, msg: NotarFallBackVoteMsg(sh) }))
+          )
           { effects: effects, post_state: addObjects(s1.post_state, sh.slot, Set(BadWindow)) }
         else
           s1
@@ -466,7 +469,9 @@ module alpenglow {
         val s1 = trySkipWindow(ls, slot)
         if (not(ItsOver.in(s1.post_state.state[slot])))
           // Skip-fallback vote
-          val effects = s1.effects.union(Set(choreo::Broadcast(SkipFallbackVoteMsg(slot))))
+          val effects = s1.effects.union(
+            Set(choreo::Broadcast({ sender: ls.process_id, msg: SkipFallbackVoteMsg(slot) }))
+          )
           { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
         else
           s1
@@ -496,7 +501,7 @@ module alpenglow {
 
   /// Listen for timeout events
   pure def upon_timeout(ctx: LocalContext): Set[Transition] = {
-    val activeTimeouts = ctx.extensions.activeTimeouts.get(ctx.state.process_id)
+    val activeTimeouts = ctx.events
     aliveSlots.filter(slot => activeTimeouts.contains(slot)).fold(Set(), (acc, slot) =>
       acc.union(processConsensusInput(TimeOutInput(slot), ctx))
     )
@@ -504,7 +509,7 @@ module alpenglow {
 
   /// Listen for block notarized events
   pure def upon_block_notarized(ctx: LocalContext): Set[Transition] = {
-    val allMessages = ctx.extensions.msgBuffer.union(byzNetworkMsgs)
+    val allMessages = ctx.messages.union(byzMessages)
     val notarizedBlocks = allBlocks.filter(b => 
       isCertified(NotarizationCertificate({ slot: b.slot, hash: b.hash }), allMessages) and
       aliveSlots.contains(b.slot)
@@ -516,7 +521,7 @@ module alpenglow {
 
   /// Listen for parent ready events
   pure def upon_parent_ready(ctx: LocalContext): Set[Transition] = {
-    val allMessages = ctx.extensions.msgBuffer.union(byzNetworkMsgs)
+    val allMessages = ctx.messages.union(byzMessages)
     val readyBlocks = allBlocks.filter(b => 
       aliveSlots.contains(b.slot) and
       parentReadyCondition(b.slot, b.hash, allMessages)
@@ -528,7 +533,7 @@ module alpenglow {
 
   /// Listen for safe to notar events
   pure def upon_safe_to_notar(ctx: LocalContext): Set[Transition] = {
-    val allMessages = ctx.extensions.msgBuffer.union(byzNetworkMsgs)
+    val allMessages = ctx.messages.union(byzMessages)
     val safeBlocks = allBlocks.filter(b => 
       aliveSlots.contains(b.slot) and
       safeToNotarCondition(ctx.state.process_id, allMessages, b.slot, b)
@@ -540,7 +545,7 @@ module alpenglow {
 
   /// Listen for safe to skip events
   pure def upon_safe_to_skip(ctx: LocalContext): Set[Transition] = {
-    val allMessages = ctx.extensions.msgBuffer.union(byzNetworkMsgs)
+    val allMessages = ctx.messages.union(byzMessages)
     val safeSlots = aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, allMessages, slot))
     safeSlots.fold(Set(), (acc, slot) =>
       acc.union(processConsensusInput(SafeToSkipInput(slot), ctx))
@@ -581,8 +586,6 @@ module alpenglow {
 
   /// Initial extensions state
   pure def initial_extensions: Extensions = {
-    msgBuffer: Set(),
-    activeTimeouts: benevolent.mapBy(v => Set(0)),
     ch: aliveSlots.mapBy(s => Set()),
     counter: 0
   }
@@ -607,7 +610,7 @@ module alpenglow {
   val s = choreo::s
 
   /// Auxiliary definition to fetch all messages
-  val allMessages = s.messages.values().flatten().union(byzNetworkMsgs)
+  val allMessages = s.messages.values().flatten().union(byzMessages)
 
   /// Agreement: no two correct processes decide on different values for the same slot
   //
