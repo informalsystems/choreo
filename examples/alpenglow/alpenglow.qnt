@@ -466,17 +466,19 @@ module alpenglow {
   }
 
   /// Listen for timeout events
-  pure def upon_timeout(ctx: LocalContext): Set[Transition] = {
+  pure def listen_timeouts(ctx: LocalContext): Set[Transition] = {
     val activeTimeouts = ctx.events
+    aliveSlots.filter(slot => activeTimeouts.contains(slot)).map(s => upon_timeout(ctx, s))
+  }
+
+  pure def upon_timeout(ctx: LocalContext, slot: Slot): Transition = {
     val ls = ctx.state
 
-    aliveSlots.filter(slot => activeTimeouts.contains(slot)).filterMap(slot => {
-      if (not(Voted.in(ls.state[slot])))
-        Some(trySkipWindow(ls, slot))
-      else
-        // No change state, no messages sent
-        None
-    })
+    if (not(Voted.in(ls.state[slot])))
+      trySkipWindow(ls, slot)
+    else
+      // No change state, no messages sent
+      { effects: Set(), post_state: ls }
   }
 
   /// Listen for block notarized events
@@ -495,72 +497,75 @@ module alpenglow {
   }
 
   /// Listen for parent ready events
-  pure def upon_parent_ready(ctx: LocalContext): Set[Transition] = {
+  pure def listen_parent_ready(ctx: LocalContext): Set[Transition] = {
     val readyBlocks = allBlocks.filter(b =>
       aliveSlots.contains(b.slot) and
       parentReadyCondition(b.slot, b.hash, ctx.messages)
     )
 
-    readyBlocks.map(block => {
-      val r1 =
-        addObjects(ctx.state, block.slot, Set(ParentReady(block.hash)))
-          .checkPendingBlocks()
-      // Start time for all slots in this window
-      val r2 = setTimeouts(r1.post_state, block.slot)
-      { effects: r1.effects.union(r2.effects), post_state: r2.post_state }
-    })
+    readyBlocks.map(block => upon_parent_ready(ctx, block.slot, block.hash))
+  }
+
+  pure def upon_parent_ready(ctx: LocalContext, slot: Slot, hash: Blockhash): Transition = {
+    val r1 =
+      addObjects(ctx.state, slot, Set(ParentReady(hash)))
+        .checkPendingBlocks()
+    // Start time for all slots in this window
+    val r2 = setTimeouts(r1.post_state, slot)
+    { effects: r1.effects.union(r2.effects), post_state: r2.post_state }
   }
 
   /// Listen for safe to notar events
-  pure def upon_safe_to_notar(ctx: LocalContext): Set[Transition] = {
+  pure def listen_safe_to_notar(ctx: LocalContext): Set[Transition] = {
     val safeBlocks = allBlocks.filter(b =>
       aliveSlots.contains(b.slot) and
       safeToNotarCondition(ctx.state.process_id, ctx.messages, b.slot, b)
     )
 
-    safeBlocks.map(block => {
-      val s1 = trySkipWindow(ctx.state, block.slot)
-      if (not(ItsOver.in(s1.post_state.state[block.slot])))
-        // Notar-fallback vote
-        val effects = s1.effects.union(
-          Set(choreo::Broadcast({
-            sender: ctx.state.process_id,
-            msg: NotarFallBackVoteMsg({ slot: block.slot, hash: block.hash })
-          }))
-        )
-        { effects: effects, post_state: addObjects(s1.post_state, block.slot, Set(BadWindow)) }
-      else
-        s1
-    })
+    safeBlocks.map(block => upon_safe_to_notar(ctx, block.slot, block.hash))
+  }
+
+  pure def upon_safe_to_notar(ctx: LocalContext, slot: Slot, hash: Blockhash): Transition = {
+    val s1 = trySkipWindow(ctx.state, slot)
+    if (not(ItsOver.in(s1.post_state.state[slot])))
+      // Notar-fallback vote
+      val effects = s1.effects.union(
+        Set(choreo::Broadcast({
+          sender: ctx.state.process_id,
+          msg: NotarFallBackVoteMsg({ slot: slot, hash: hash })
+        }))
+      )
+      { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
+    else
+      s1
   }
 
   /// Listen for safe to skip events
-  pure def upon_safe_to_skip(ctx: LocalContext): Set[Transition] = {
+  pure def listen_safe_to_skip(ctx: LocalContext): Set[Transition] =
     val safeSlots = aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, ctx.messages, slot))
-    safeSlots.map(slot => {
-      val s1 = trySkipWindow(ctx.state, slot)
-      if (not(ItsOver.in(s1.post_state.state[slot])))
-        // Skip-fallback vote
-        val effects = s1.effects.union(
-          Set(choreo::Broadcast({ sender: ctx.state.process_id, msg: SkipFallbackVoteMsg(slot) }))
-        )
-        { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
-      else
-        s1
-    })
+    safeSlots.map(slot => upon_safe_to_skip(ctx, slot))
+
+  pure def upon_safe_to_skip(ctx: LocalContext, slot: Slot): Transition = {
+    val s1 = trySkipWindow(ctx.state, slot)
+    if (not(ItsOver.in(s1.post_state.state[slot])))
+      // Skip-fallback vote
+      val effects = s1.effects.union(
+        Set(choreo::Broadcast({ sender: ctx.state.process_id, msg: SkipFallbackVoteMsg(slot) }))
+      )
+      { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
+    else
+      s1
   }
 
   /// Main listener combining all event handlers
   pure def main_listener(ctx: LocalContext): Set[Transition] =
     Set(
       listen_block_inputs(ctx),
-      // upon_block_input(ctx),
-      upon_timeout(ctx),
+      listen_timeouts(ctx),
       listen_block_notarized(ctx),
-      // upon_block_notarized(ctx),
-      upon_parent_ready(ctx),
-      upon_safe_to_notar(ctx),
-      upon_safe_to_skip(ctx)
+      listen_parent_ready(ctx),
+      listen_safe_to_notar(ctx),
+      listen_safe_to_skip(ctx)
     ).flatten()
 
   // -----------------------------------------------------------------------------
