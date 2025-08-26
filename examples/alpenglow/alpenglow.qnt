@@ -529,9 +529,8 @@ module alpenglow {
 
   /// Listen for block notarized events
   pure def upon_block_notarized(ctx: LocalContext): Set[Transition] = {
-    val allMessages = ctx.messages.union(byzMessages)
-    val notarizedBlocks = allBlocks.filter(b => 
-      isCertified(NotarizationCertificate({ slot: b.slot, hash: b.hash }), allMessages) and
+    val notarizedBlocks = allBlocks.filter(b =>
+      isCertified(NotarizationCertificate({ slot: b.slot, hash: b.hash }), ctx.messages) and
       aliveSlots.contains(b.slot)
     )
     notarizedBlocks.fold(Set(), (acc, block) =>
@@ -541,10 +540,9 @@ module alpenglow {
 
   /// Listen for parent ready events
   pure def upon_parent_ready(ctx: LocalContext): Set[Transition] = {
-    val allMessages = ctx.messages.union(byzMessages)
-    val readyBlocks = allBlocks.filter(b => 
+    val readyBlocks = allBlocks.filter(b =>
       aliveSlots.contains(b.slot) and
-      parentReadyCondition(b.slot, b.hash, allMessages)
+      parentReadyCondition(b.slot, b.hash, ctx.messages)
     )
     readyBlocks.fold(Set(), (acc, block) =>
       acc.union(processConsensusInput(ParentReadyInput({ slot: block.slot, hash: block.hash }), ctx))
@@ -553,10 +551,9 @@ module alpenglow {
 
   /// Listen for safe to notar events
   pure def upon_safe_to_notar(ctx: LocalContext): Set[Transition] = {
-    val allMessages = ctx.messages.union(byzMessages)
-    val safeBlocks = allBlocks.filter(b => 
+    val safeBlocks = allBlocks.filter(b =>
       aliveSlots.contains(b.slot) and
-      safeToNotarCondition(ctx.state.process_id, allMessages, b.slot, b)
+      safeToNotarCondition(ctx.state.process_id, ctx.messages, b.slot, b)
     )
     safeBlocks.fold(Set(), (acc, block) =>
       acc.union(processConsensusInput(SafeToNotarInput({ slot: block.slot, hash: block.hash }), ctx))
@@ -565,8 +562,7 @@ module alpenglow {
 
   /// Listen for safe to skip events
   pure def upon_safe_to_skip(ctx: LocalContext): Set[Transition] = {
-    val allMessages = ctx.messages.union(byzMessages)
-    val safeSlots = aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, allMessages, slot))
+    val safeSlots = aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, ctx.messages, slot))
     safeSlots.fold(Set(), (acc, slot) =>
       acc.union(processConsensusInput(SafeToSkipInput(slot), ctx))
     )
@@ -612,7 +608,7 @@ module alpenglow {
 
   action init = choreo::init({
     system: benevolent.mapBy(n => initialize_process(n)),
-    messages: benevolent.mapBy(n => Set()),
+    messages: benevolent.mapBy(n => byzMessages),
     events: benevolent.mapBy(n => Set(0)), // initial timeout for slot 0
     extensions: initial_extensions
   })
@@ -630,7 +626,7 @@ module alpenglow {
   val s = choreo::s
 
   /// Auxiliary definition to fetch all messages
-  val allMessages = s.messages.values().flatten().union(byzMessages)
+  val allMessages = s.messages.values().flatten()
 
   /// Agreement: no two correct processes decide on different values for the same slot
   //
@@ -745,10 +741,7 @@ module some_byz_vp {
   //   .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
   //   .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
   //   .expect(fastFinalized(0, allMessages) == Set(42))
-
 }
-
-
 
 module too_many_byz_1 {
   // to violate agreement, run
@@ -821,5 +814,4 @@ module too_many_byz {
   //           { msg: FinalVoteMsg(0), sender: "b1" },
   //           { msg: FinalVoteMsg(0), sender: "b2" })
   //     .subseteq(allMessages))
-
 }
