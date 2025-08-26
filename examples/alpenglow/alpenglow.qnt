@@ -172,6 +172,26 @@ module alpenglow {
       | FinalVoteMsg(slot) => slot
     }
 
+  // Definition 5 (ancestor and descendant). An ancestor of a block b is any
+  // block that can be reached from b by the parent links, i.e., b, b’s parent,
+  // b’s parent’s parent, and so on. If b′ is an ancestor of b, b is a
+  // descendant of b′ . Note that b is its own ancestor and descendant.
+  pure def isDescendant(a: Block, b: Block): bool = {
+    // TODO: this can have better performance if we can make assumptions about slots
+    // Filter by minimal slot
+    // The slot of the parent will always be smaller then that of the child
+    // but its not in increments of 1 like in mysticeti
+    pure val bAncestors = (b.slot.to(a.slot)).fold(Set(b.hash), (path, s) =>
+      pure val potentialAncestors = allBlocks.filter(block => block.slot == s)
+      pure val ancestors = potentialAncestors.filter(ancestor =>
+        path.exists(h => ancestor.parent == h)
+      )
+      path.union(ancestors.map(block => block.hash))
+    )
+
+    bAncestors.contains(a.hash)
+  }
+
   /// line 10 of TryNotar. TODO: Is there more to it?
   pure def firstSlotInLeaderWindow(slot: Slot): bool =
     slot % 4 == 0 // TODO implement
@@ -617,8 +637,46 @@ module alpenglow {
   val agreement =
     aliveSlots.forall(slot => finalized(slot, allMessages).size() <= 1)
 
-  /// Validity: if a correct process decides v, then v was proposed by some process
-  pure def validity: bool = true // Simplified for now
+  val fastAgreement =
+    aliveSlots.forall(slot => fastFinalized(slot, allMessages).union(finalized(slot, allMessages)).size() <= 1)
+
+  // Witness was used to find bug in safeToNotar encoding
+  val noBad =
+    benevolent.forall(v => not(s.system.get(v).state[1].contains(BadWindow)))
+
+  /// Witness to find a run where a block is fast finalized
+  val fastFinalizedWitness =
+    allBlocks.forall(b => not(isCertified(FastFinalizationCertificate(b.reference()), allMessages)))
+
+  /// Witness to find a run where a timeout is started
+  val timeoutWitness =
+     s.events.values().forall(v => v == Set())
+
+  /// Theorem 1 (safety). If any correct node finalizes a block b in slot s and any
+  /// correct node finalizes any block b′ in any slot s′ ≥ s, b′ is a descendant of b.
+  val safety = tuples(aliveSlots, allBlocks).forall(((slot, block)) => {
+    val finalizedAtSlot = finalized(slot, allMessages)
+    block.hash.in(finalizedAtSlot) implies tuples(
+      aliveSlots.filter(s2 => s2 >= slot), allBlocks).forall(((slot2, block2)) => {
+      block2.hash.in(finalized(slot2, allMessages)) implies block2.isDescendant(block)
+    })
+  })
+
+  /// This generates example traces where a block is finalized after some empty slots
+  /// increase max steps to approx 100.
+  val emptySlotsWitness =
+    aliveSlots.forall(s1 =>
+      aliveSlots.forall(s2 =>
+        s1 < s2 implies
+      s.extensions.ch.get(s1).size() >= s.extensions.ch.get(s2).size()))
+
+  /// This generates example traces where every slot is finalized
+  /// increase max steps to approx 100.
+  val noEmptySlotsWitness =
+    aliveSlots.exists(s1 =>
+      s.extensions.ch.get(s1).size() == 0)
+
+  // TODO finalize ancestors locally
 }
 
 module some_byz {
