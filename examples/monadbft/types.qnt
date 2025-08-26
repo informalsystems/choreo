@@ -130,7 +130,7 @@ module types {
     | Prop(Proposal)
     | Vote(VoteMsg)
     | Timeout(TimeoutMsg)
-    | NoEndorsement(NoEndorsementMsg)
+    // | NoEndorsement(NoEndorsementMsg)
 
   type CustomEffects =
     | LogMessage(Message)
