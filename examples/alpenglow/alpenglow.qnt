@@ -47,7 +47,7 @@ module alpenglow {
   type Blockhash = int
 
   /// Fields are lists indexed by slot
-  type State = {
+  type StateFields = {
     pendingBlocks: List[Option[Block]],
     state: List[Set[SlotObject]],
   }
@@ -109,10 +109,10 @@ module alpenglow {
   }
 
   /* Boilerplate */
-  type LocalState = choreo::LocalState[ProcessID, State]
-  type LocalContext = choreo::LocalContext[ProcessID, State, Message, TimeoutEvent, Extensions]
-  type Transition = choreo::Transition[ProcessID, State, Message, TimeoutEvent, CustomEffects]
-  type GlobalContext = choreo::GlobalContext[ProcessID, State, Message, TimeoutEvent, Extensions]
+  type LocalState = choreo::LocalState[ProcessID, StateFields]
+  type LocalContext = choreo::LocalContext[ProcessID, StateFields, Message, TimeoutEvent, Extensions]
+  type Transition = choreo::Transition[ProcessID, StateFields, Message, TimeoutEvent, CustomEffects]
+  type GlobalContext = choreo::GlobalContext[ProcessID, StateFields, Message, TimeoutEvent, Extensions]
   /* End of boilerplate */
 
   // -----------------------------------------------------------------------------
@@ -146,10 +146,10 @@ module alpenglow {
     )
   }
 
-  pure def addObjects(ls: State, slot: Slot, obj: Set[SlotObject]): State =
+  pure def addObjects(ls: LocalState, slot: Slot, obj: Set[SlotObject]): LocalState =
     { ...ls, state: ls.state.replaceAt(slot, ls.state[slot].union(obj)) }
 
-  pure def setPendingBlock(ls: State, slot: Slot, b: Option[Block]): State =
+  pure def setPendingBlock(ls: LocalState, slot: Slot, b: Option[Block]): LocalState =
     { ...ls, pendingBlocks: ls.pendingBlocks.replaceAt(slot, b) }
 
   /// Threshold to get a (super)majority
@@ -264,14 +264,14 @@ module alpenglow {
     else
       Set(slot - 3, slot - 2, slot - 1, slot)
 
-  pure def setTimeouts(ls: State, slot: Slot): { output: Set[choreo::Effect[ProcessID, Message, TimeoutEvent, CustomEffects]], post: State } =
-    { post: ls,
-      output: windowSlots(slot).map(i => choreo::CustomEffect(ScheduleEventTimeout(i))) }
+  pure def setTimeouts(ls: LocalState, slot: Slot): Transition =
+    { post_state: ls,
+      effects: windowSlots(slot).map(i => choreo::CustomEffect(ScheduleEventTimeout(i))) }
 
   /// Check if a notarization vote can be cast
-  pure def tryNotar(ls: State, b: Block): { result: { output: Set[choreo::Effect[ProcessID, Message, TimeoutEvent, CustomEffects]], post: State }, success: bool } =
+  pure def tryNotar(ls: LocalState, b: Block): { result: Transition, success: bool } =
     if (ls.state[b.slot].contains(Voted))
-      { result: { post: ls, output: Set() }, success: false }
+      { result: { post_state: ls, effects: Set() }, success: false }
     else
       val firstSlot = firstSlotInLeaderWindow(b.slot)
       if ((firstSlot and ParentReady(b.parent).in(ls.state[b.slot]))
@@ -286,40 +286,40 @@ module alpenglow {
         // Maybe vote finalize as well
         val tf = tryFinal(s2, b.slot, b.hash)
 
-        { result: { post: tf.post, output: out.union(tf.output) }, success: true }
+        { result: { post_state: tf.post_state, effects: out.union(tf.effects) }, success: true }
       else
-        { result: { post: ls, output: Set() }, success: false }
+        { result: { post_state: ls, effects: Set() }, success: false }
 
-  pure def tryFinal(ls: State, slot: Slot, hash: Blockhash): { output: Set[choreo::Effect[ProcessID, Message, TimeoutEvent, CustomEffects]], post: State } =
+  pure def tryFinal(ls: LocalState, slot: Slot, hash: Blockhash): Transition =
     if (BlockNotarized(hash).in(ls.state[slot]) and VotedNotar(hash).in(ls.state[slot])
         and not(BadWindow.in(ls.state[slot])))
       // Finalization vote
-      { output: Set(choreo::Broadcast(FinalVoteMsg(slot))), post: addObjects(ls, slot, Set(ItsOver)) }
+      { effects: Set(choreo::Broadcast(FinalVoteMsg(slot))), post_state: addObjects(ls, slot, Set(ItsOver)) }
     else
-      { output: Set(), post: ls }
+      { effects: Set(), post_state: ls }
 
-  pure def trySkipWindow(ls: State, slot: Slot): { output: Set[choreo::Effect[ProcessID, Message, TimeoutEvent, CustomEffects]], post: State } =
+  pure def trySkipWindow(ls: LocalState, slot: Slot): Transition =
     // Skip unvoted slots
-    windowSlots(slot).fold({ output: Set(), post: ls }, (s, k) => {
-      if (not(Voted.in(s.post.state[k])))
+    windowSlots(slot).fold({ effects: Set(), post_state: ls }, (s, k) => {
+      if (not(Voted.in(s.post_state.state[k])))
         // Skip vote
         val update = Set(choreo::Broadcast(SkipVoteMsg(k)))
-        val s2 = addObjects(s.post, k, Set(Voted, BadWindow))
+        val s2 = addObjects(s.post_state, k, Set(Voted, BadWindow))
           .setPendingBlock(k, None)
 
-        { output: s.output.union(update), post: s2 }
+        { effects: s.effects.union(update), post_state: s2 }
       else
         s
     })
 
-  pure def checkPendingBlocks(ls: State): { output: Set[choreo::Effect[ProcessID, Message, TimeoutEvent, CustomEffects]], post: State } =
+  pure def checkPendingBlocks(ls: LocalState): Transition =
     // Iterate with increasing slot
     // (left to right)
-    ls.pendingBlocks.foldl({ output: Set(), post: ls }, (res, pendingBlock) =>
+    ls.pendingBlocks.foldl({ effects: Set(), post_state: ls }, (res, pendingBlock) =>
       match pendingBlock {
         | Some(b) =>
-          val tn = tryNotar(res.post, b)
-          { output: res.output.union(tn.result.output), post: tn.result.post }
+          val tn = tryNotar(res.post_state, b)
+          { effects: res.effects.union(tn.result.effects), post_state: tn.result.post_state }
         | None =>
           res
       }
@@ -420,27 +420,27 @@ module alpenglow {
   }
 
   /// Algorithm 1: each upon corresponds to one consensus input
-  pure def consensus(ls: State, input: ConsensusInput): { output: Set[choreo::Effect[ProcessID, Message, TimeoutEvent, CustomEffects]], post: State } =
+  pure def consensus(ls: LocalState, input: ConsensusInput): Transition =
     match input {
       | BlockInput(b) =>
         val tn = tryNotar(ls, b) // looks like a function but has two side effects: changes state and broadcasts
         if (tn.success)
-          val cpb = checkPendingBlocks(tn.result.post)
+          val cpb = checkPendingBlocks(tn.result.post_state)
           // as tryNotar changed the local state, we pass it to checkPendingBlocks
-          { post: cpb.post, output: cpb.output.union(tn.result.output) }
+          { post_state: cpb.post_state, effects: cpb.effects.union(tn.result.effects) }
           // both, tryNotar and checkPendingBlocks have side effects of sending messages. Thus we build the union here.
-        else if (not(Voted.in(tn.result.post.state[b.slot])))
-          { output: tn.result.output, post: setPendingBlock(tn.result.post, b.slot, Some(b)) }
+        else if (not(Voted.in(tn.result.post_state.state[b.slot])))
+          { effects: tn.result.effects, post_state: setPendingBlock(tn.result.post_state, b.slot, Some(b)) }
         else
           // Even if all if conditions evaluate to false, tryNotar may have side effects and may change the local state
-          { output: tn.result.output, post: tn.result.post } // The state might have changed although all if conditions evaluate to false
+          tn.result // The state might have changed although all if conditions evaluate to false
 
       | TimeOutInput(slot) =>
         if (not(Voted.in(ls.state[slot])))
           trySkipWindow(ls, slot)
         else
           // No change state, no messages sent
-          { output: Set(), post: ls }
+          { effects: Set(), post_state: ls }
 
       | BlockNotarizedInput(sh) =>
         val s1 = addObjects(ls, sh.slot, Set(BlockNotarized(sh.hash)))
@@ -450,24 +450,24 @@ module alpenglow {
         val s1 = addObjects(ls, sh.slot, Set(ParentReady(sh.hash)))
         val s2 = checkPendingBlocks(s1)
         // Start time for all slots in this window
-        val s3 = setTimeouts(s2.post, sh.slot)
-        { output: s2.output.union(s3.output), post: s3.post }
+        val s3 = setTimeouts(s2.post_state, sh.slot)
+        { effects: s2.effects.union(s3.effects), post_state: s3.post_state }
 
       | SafeToNotarInput(sh) =>
         val s1 = trySkipWindow(ls, sh.slot)
-        if (not(ItsOver.in(s1.post.state[sh.slot])))
+        if (not(ItsOver.in(s1.post_state.state[sh.slot])))
           // Notar-fallback vote
-          val output = s1.output.union(Set(choreo::Broadcast(NotarFallBackVoteMsg(sh))))
-          { output: output, post: addObjects(s1.post, sh.slot, Set(BadWindow)) }
+          val effects = s1.effects.union(Set(choreo::Broadcast(NotarFallBackVoteMsg(sh))))
+          { effects: effects, post_state: addObjects(s1.post_state, sh.slot, Set(BadWindow)) }
         else
           s1
 
       | SafeToSkipInput(slot) =>
         val s1 = trySkipWindow(ls, slot)
-        if (not(ItsOver.in(s1.post.state[slot])))
+        if (not(ItsOver.in(s1.post_state.state[slot])))
           // Skip-fallback vote
-          val output = s1.output.union(Set(choreo::Broadcast(SkipFallbackVoteMsg(slot))))
-          { output: output, post: addObjects(s1.post, slot, Set(BadWindow)) }
+          val effects = s1.effects.union(Set(choreo::Broadcast(SkipFallbackVoteMsg(slot))))
+          { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
         else
           s1
     }
@@ -478,13 +478,9 @@ module alpenglow {
 
   /// Process consensus input and convert to choreo transition
   pure def processConsensusInput(input: ConsensusInput, ctx: LocalContext): Set[Transition] = {
-    val state_without_id = { pendingBlocks: ctx.state.pendingBlocks, state: ctx.state.state }
-    val result = consensus(state_without_id, input)
-    if (result.output.size() > 0 or result.post != state_without_id) {
-      Set({
-        effects: result.output,
-        post_state: { ...ctx.state, pendingBlocks: result.post.pendingBlocks, state: result.post.state }
-      })
+    val result = consensus(ctx.state, input)
+    if (result.effects.size() > 0 or result.post_state != ctx.state) {
+      Set(result)
     } else {
       Set()
     }
@@ -568,8 +564,8 @@ module alpenglow {
 
   /// Initialize process state
   pure def initialize_process(process: ProcessID): LocalState = {
-    val maxSlot = if (aliveSlots.size() > 0) aliveSlots.fold(-1, (acc, s) => max(acc, s)) else 4
-    val slots = 0.to(maxSlot)
+    // preload state for 5 slots
+    pure val slots = 0.to(4)
     {
       process_id: process,
       pendingBlocks: slots.fold([], (acc, _) => acc.append(None)),
@@ -608,9 +604,161 @@ module alpenglow {
   // Invariants and properties
   // -----------------------------------------------------------------------------
 
+  val s = choreo::s
+
+  /// Auxiliary definition to fetch all messages
+  val allMessages = s.messages.values().flatten().union(byzNetworkMsgs)
+
   /// Agreement: no two correct processes decide on different values for the same slot
-  pure def agreement: bool = true // Simplified for now
-  
+  //
+  val agreement =
+    aliveSlots.forall(slot => finalized(slot, allMessages).size() <= 1)
+
   /// Validity: if a correct process decides v, then v was proposed by some process
   pure def validity: bool = true // Simplified for now
+}
+
+module some_byz {
+  // For a trace where a value is fast finalized call
+  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness
+  // Same but one process reached ItsOver
+  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness  --seed=0x11fa3a6ddd2666
+  import alpenglow(
+    correct = Set("v1", "v2", "v3", "v4", "v5"),
+    good = Set(),
+    byzantine = Set("b1"),
+    power = Set("v1", "v2", "v3", "v4", "v5", "b1").mapBy(_ => 1),
+    correctBlocks = Set(
+      { slot: 0, hash: 42, parent: -1 },
+      { slot: 1, hash: 43, parent: 42 },
+      { slot: 2, hash: 44, parent: 43 },
+    ),
+    byzantineBlocks = Set(
+      { slot: 1, hash: 46, parent: 42 },
+      { slot: 1, hash: 47, parent: 45 },
+      { slot: 2, hash: 48, parent: 43 },
+      { slot: 2, hash: 49, parent: 45 },
+    ),
+    aliveSlots = 0.to(2),
+    aliveHashes = 42.to(49),
+  ).*
+
+  // run ffTest =
+  //   init
+  //   .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+  //   .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+  //   .then(receiveSpecificBlock("v3", { hash: 42, parent: -1, slot: 0 }))
+  //   .then(receiveSpecificBlock("v4", { hash: 42, parent: -1, slot: 0 }))
+  //   .expect(fastFinalized(0, allMessages) == Set(42))
+
+}
+
+
+module some_byz_vp {
+  // For a trace where a value is fast finalized call
+  // quint run statemachine.qnt --main some_byz --invariant fastFinalizedWitness
+  // Same but one process reached ItsOver
+  // quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness  --seed=0x11fa3a6ddd2666
+  import alpenglow(
+    correct = Set("v1", "v2"),
+    good = Set(),
+    byzantine = Set("b1"),
+    power = Map("v1" -> 3, "v2" -> 2, "b1"-> 1),
+    correctBlocks = Set(
+      { slot: 0, hash: 42, parent: -1 },
+      { slot: 1, hash: 43, parent: 42 },
+      { slot: 2, hash: 44, parent: 43 },
+    ),
+    byzantineBlocks = Set(
+      { slot: 1, hash: 46, parent: 42 },
+      { slot: 1, hash: 47, parent: 45 },
+      { slot: 2, hash: 48, parent: 43 },
+      { slot: 2, hash: 49, parent: 45 },
+    ),
+    aliveSlots = 0.to(2),
+    aliveHashes = 42.to(49),
+  ).*
+
+  // run ffTest =
+  //   init
+  //   .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+  //   .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+  //   .expect(fastFinalized(0, allMessages) == Set(42))
+
+}
+
+
+
+module too_many_byz_1 {
+  // to violate agreement, run
+  // quint run statemachine.qnt --main too_many_byz_1 --step oneSlotNoTimeout  --invariant agreement
+
+  import alpenglow(
+    correct = Set("v1", "v2", "v3", "v4"),
+    good = Set(),
+    byzantine = Set("b1"),
+    power = Set("v1", "v2", "v3", "v4", "b1").mapBy(_ => 1),
+    correctBlocks = Set(
+      { slot: 0, hash: 42, parent: -1 },
+      { slot: 1, hash: 43, parent: 42 },
+      { slot: 2, hash: 44, parent: 43 },
+    ),
+    byzantineBlocks = Set(
+      { slot: 0, hash: 45, parent: -1 },
+      { slot: 1, hash: 46, parent: 42 },
+      { slot: 1, hash: 47, parent: 45 },
+      { slot: 2, hash: 48, parent: 43 },
+      { slot: 2, hash: 49, parent: 45 },
+    ),
+    aliveSlots = 0.to(2),
+    aliveHashes = 42.to(49),
+  ).*
+}
+
+module too_many_byz {
+  // to violate agreement, run
+  // quint run statemachine.qnt --main too_many_byz --step oneSlotNoTimeout --invariant agreement
+
+  import alpenglow(
+    correct = Set("v1", "v2", "v3", "v4"),
+    good = Set(),
+    byzantine = Set("b1", "b2"),
+    power = Set("v1", "v2", "v3", "v4", "b1", "b2").mapBy(_ => 1),
+    correctBlocks = Set({ slot: 0, hash: 42, parent: -1 }),
+    byzantineBlocks = Set({ slot: 0, hash: 41, parent: -1 }),
+    aliveSlots = Set(0),
+    aliveHashes = 41.to(42),
+  ).*
+
+  // run disagreement_example_Test =
+  //   init
+  //   .then(receiveSpecificBlock("v3", { hash: 41, parent: -1, slot: 0 }))
+  //   .then(receiveSpecificBlock("v4", { hash: 41, parent: -1, slot: 0 }))
+  //   .expect(s.msgBuffer ==
+  //     Set(  { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+  //           { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" }))
+  //   .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
+  //   .then(blockNotarizedAction("v3", 0))
+  //   .then(blockNotarizedAction("v4", 0))
+  //   .expect(
+  //       Set(  { msg: FinalVoteMsg(0), sender: "v3" },
+  //             { msg: FinalVoteMsg(0), sender: "v4" })
+  //       .subseteq(s.msgBuffer))
+  //   .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
+  //   .expect(not(agreement))
+  //   .expect(
+  //     Set(  { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+  //           { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" },
+  //           { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b1" },
+  //           { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b2" },
+  //           { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v1" },
+  //           { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v2" },
+  //           { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b1" },
+  //           { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b2" },
+  //           { msg: FinalVoteMsg(0), sender: "v3" },
+  //           { msg: FinalVoteMsg(0), sender: "v4" },
+  //           { msg: FinalVoteMsg(0), sender: "b1" },
+  //           { msg: FinalVoteMsg(0), sender: "b2" })
+  //     .subseteq(allMessages))
+
 }
