@@ -656,6 +656,9 @@ module tendermint {
   action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
     choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
 
+  action step_deterministic(v: Node, listener: LocalContext => Transition): bool =
+    choreo::step_deterministic(v, listener, (c, _) => c, (e, p) => e)
+
   action step_with_filter(
     v: Node,
     listener: LocalContext => Set[Transition],
@@ -688,13 +691,12 @@ module valid {
   ).*
 
   run line28Test = init
-    .then(step_with("p1", upon_proposal_in_propose))
-    .then(step_with("p2", upon_proposal_in_propose))
-    .then(step_with("p1", upon_quorum_prevotes_any))
-    .then(step_with("p2", upon_quorum_prevotes_any))
+    .then(step_with("p1", listen_proposal_in_propose))
+    .then(step_with("p2", listen_proposal_in_propose))
 
-    .then(step_with("p2", upon_quorum_precommits_any))
-    .then(step_with("p2", upon_proposal_in_prevote_commit))
+    .then(step_with("p2", listen_quorum_precommits_any))
+
+    .then(step_with("p2", listen_proposal_in_prevote_commit))
     .then(step_with("p2", on_precommit_timeout))
     // p2 starts a new round
     .expect(s.system.get("p2").round == 1)
@@ -709,7 +711,7 @@ module valid {
 
     // Which enables line 28 to be called by p2, as it is in propose stage and can receive
     // the new proposal with valid_round 0.
-    .then(step_with("p2", upon_proposal_in_propose_prevote))
+    .then(step_with("p2", listen_proposal_in_propose_prevote))
 }
 
 module no_agreement {
@@ -724,39 +726,29 @@ module no_agreement {
   ).*
 
   run disagreementTest = init
-    // There are several byzantine proposals. Lose the ones we don't want to consume
-    .then("p1".lose_messages(
-      ms => ms.get_proposals().filter(p => p.proposal != "v0").map(p => Propose(p))
-    ))
-    .then("p2".lose_messages(
-      ms => ms.get_proposals().filter(p => p.proposal != "v1").map(p => Propose(p))
-    ))
-
     // p1 reacts to the byzantine proposal for v0
-    .then(step_with("p1", upon_proposal_in_propose))
+    .then(step_deterministic("p1", (ctx) =>
+      upon_proposal_in_propose(ctx, { proposal: "v0", round: 0, src: "p3", valid_round: -1 })
+    ))
     // p2 reacts to the byzantine proposal for v1
-    .then(step_with("p2", upon_proposal_in_propose))
+    .then(step_deterministic("p2", (ctx) =>
+      upon_proposal_in_propose(ctx, { proposal: "v1", round: 0, src: "p3", valid_round: -1 })
+    ))
 
-    // Partitioning: p1 and p2 lose each other's messages
-    .then("p1".lose_messages(ms => ms.filter(m => m.source() == "p2")))
-    .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
-
-    // p1 doesn't see the prevote from p2, but there are enough prevotes without it
-    .then(step_with("p1", upon_quorum_prevotes_any))
-    // p2 doesn't see the prevote from p1, but there are enough prevotes without it
-    .then(step_with("p2", upon_quorum_prevotes_any))
-
-    // Partitioning: p1 and p2 lose each other's messages
-    .then("p1".lose_messages(ms => ms.filter(m => m.source() == "p2")))
-    .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
-
-    // p1 doesn't see the precommit from p2, but there are enough precommits without it
-    .then(step_with("p1", upon_proposal_in_prevote_commit))
-    // p2 doesn't see the precommit from p1, but there are enough precommits without it
-    .then(step_with("p2", upon_proposal_in_prevote_commit))
+    // Counting the byzantine prevotes, both p1 and p2 have quorum for different values
+    .then(step_deterministic("p1", (ctx) =>
+      upon_proposal_in_prevote_commit(ctx, { proposal: "v0", round: 0, src: "p3", valid_round: -1 })
+    ))
+    .then(step_deterministic("p2", (ctx) =>
+      upon_proposal_in_prevote_commit(ctx, { proposal: "v1", round: 0, src: "p3", valid_round: -1 })
+    ))
 
     // Now we just take the final steps towards decision
-    .then(step_with("p1", upon_proposal_in_precommit_no_decision))
-    .then(step_with("p2", upon_proposal_in_precommit_no_decision))
+    .then(step_deterministic("p1", (ctx) =>
+      upon_proposal_in_precommit_no_decision(ctx, { proposal: "v0", round: 0, src: "p3", valid_round: -1 })
+    ))
+    .then(step_deterministic("p2", (ctx) =>
+      upon_proposal_in_precommit_no_decision(ctx, { proposal: "v1", round: 0, src: "p3", valid_round: -1 })
+    ))
     .expect(not(agreement))
 }
