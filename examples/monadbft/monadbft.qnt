@@ -474,17 +474,17 @@ module monadbft {
       .values()
       .filterMap(s => build_qc(s, ls.process_id, state_hash(ls)))
 
-    quorums.filterMap(qc => upon_leader_vote_quorum(context, qc))
+    quorums.filter(qc => {
+      val new_s = increment_view(qc.view, ls)
+      new_s.post_state.am_i_leader()
+    }).map(qc => upon_leader_vote_quorum(context, qc))
   }
 
-  pure def upon_leader_vote_quorum(context: LocalContext, qc: QC): Option[Transition] = {
+  pure def upon_leader_vote_quorum(context: LocalContext, qc: QC): Transition = {
     val ls = context.state
     val new_s = increment_view(qc.view, ls)
 
-    // Skip this quorum if I'm not the leader in the new view
-    if (not(new_s.post_state.am_i_leader())) None else
-
-    Some(new_s.and_then(s => {
+    new_s.and_then(s => {
       val new_block = build_block(qc, BLOCK_PAYLOAD)
       val p = build_proposal(s.curView, new_block, None, None, s.process_id)
         {
@@ -494,7 +494,7 @@ module monadbft {
             choreo::CustomEffect(LogProposal(p))
           )
         }
-    }))
+    })
   }
 
   pure def listen_leader_timeout_quorum(context: LocalContext): Set[Transition] = {

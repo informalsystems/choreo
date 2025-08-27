@@ -159,7 +159,7 @@ module tendermint {
     enabled_proposals.map(p => upon_proposal_in_propose(ctx, p))
   }
 
-  pure def upon_proposal_in_propose(ctx: LocalContext, p: ProposeMsg): Set[Transition] = {
+  pure def upon_proposal_in_propose(ctx: LocalContext, p: ProposeMsg): Transition = {
     val s = ctx.state
 
     // Broadcast the PreVote message for the proposal
