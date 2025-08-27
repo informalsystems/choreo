@@ -159,7 +159,7 @@ module tendermint {
     enabled_proposals.map(p => upon_proposal_in_propose(ctx, p))
   }
 
-  pure def upon_proposal_in_propose(ctx: LocalContext, p: ProposeMsg): Set[Transition] = {
+  pure def upon_proposal_in_propose(ctx: LocalContext, p: ProposeMsg): Transition = {
     val s = ctx.state
 
     // Broadcast the PreVote message for the proposal
@@ -172,11 +172,11 @@ module tendermint {
     // TODO -> add timeout and logging effects
     {
       post_state: { ...s, stage: PreVoteStage },
-      effetcs: effects
+      effects: effects
     }
   }
 
-  pure def upon_proposal_in_propose_prevote(ctx: LocalContext): Set[Transition] = {
+  pure def listen_proposal_in_propose_prevote(ctx: LocalContext): Set[Transition] = {
     val s = ctx.state
     val messages = ctx.messages
 
@@ -200,6 +200,12 @@ module tendermint {
       pre_votes.filter(q => q.id == Some(p.proposal.id()) and q.round == p.valid_round).size() >= 2 * F + 1 // quorum size is F + 1
     })
 
+    enabled_proposals.map(p => upon_proposal_in_propose_prevote(ctx, p))
+  }
+
+  pure def upon_proposal_in_propose_prevote(ctx: LocalContext, p: ProposeMsg): Transition = {
+    val s = ctx.state
+
     def effect_builder = (p) => {
       // Broadcast the PreVote message for the proposal
       if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
@@ -209,14 +215,14 @@ module tendermint {
       }
     }
 
-    enabled_proposals.map(p => {
+    {
       post_state: { ...s, stage: PreVoteStage },
       effects: effect_builder(p)
-    })
+    }
   }
 
 
-  pure def upon_quorum_prevotes_any(ctx: LocalContext): Set[Transition] = {
+  pure def listen_quorum_prevotes_any(ctx: LocalContext): Set[Transition] = {
     val s = ctx.state
     val messages = ctx.messages
 
@@ -227,17 +233,23 @@ module tendermint {
     }).size() >= 2 * F + 1 // quorum size is F + 1
 
     if (quorum) {
-      // If we have a quorum, we can move to precommit stage
-      Set({
-        post_state: s,
-        effects: Set(choreo::TriggerEvent({ kind: PreVoteTimeout, round: s.round }))
-      })
+      Set(upon_quorum_prevotes_any(ctx))
     } else {
       Set()
     }
   }
 
-  pure def upon_quorum_nil_prevotes(ctx: LocalContext): Set[Transition] = {
+  pure def upon_quorum_prevotes_any(ctx: LocalContext): Transition = {
+    val s = ctx.state
+
+    // If we have a quorum, we can move to precommit stage
+    {
+      post_state: s,
+      effects: Set(choreo::TriggerEvent({ kind: PreVoteTimeout, round: s.round }))
+    }
+  }
+
+  pure def listen_quorum_nil_prevotes(ctx: LocalContext): Set[Transition] = {
     val s = ctx.state
     val messages = ctx.messages
 
@@ -251,18 +263,23 @@ module tendermint {
     val quorum = prevotes.size() >= 2 * F + 1
 
     if (quorum and state_guard) {
-      // If we have a quorum, we can move to precommit stage
-      val outputs = Set({
-        post_state: { ...s, stage: PreCommitStage },
-        effects: Set(choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
-      })
-      outputs
+      Set(upon_quorum_nil_prevotes(ctx))
     } else {
       Set()
     }
   }
 
-  pure def upon_quorum_precommits_any(ctx: LocalContext): Set[Transition] = {
+  pure def upon_quorum_nil_prevotes(ctx: LocalContext): Transition = {
+    val s = ctx.state
+
+    // If we have a quorum, we can move to precommit stage
+    {
+      post_state: { ...s, stage: PreCommitStage },
+      effects: Set(choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
+    }
+  }
+
+  pure def listen_quorum_precommits_any(ctx: LocalContext): Set[Transition] = {
     val s = ctx.state
     val messages = ctx.messages
 
@@ -273,17 +290,23 @@ module tendermint {
     }).size() >= 2 * F + 1 // quorum size is F + 1
 
     if (quorum) {
-      // If we have a quorum, we can move to decided stage
-      Set({
-        post_state: s,
-        effects: Set(choreo::TriggerEvent({ kind: PreCommitTimeout, round: s.round }))
-      })
+      Set(upon_quorum_precommits_any(ctx))
     } else {
       Set()
     }
   }
 
-  pure def upon_proposal_in_prevote_commit(ctx: LocalContext): Set[Transition] = {
+  pure def upon_quorum_precommits_any(ctx: LocalContext): Transition = {
+    val s = ctx.state
+
+    // If we have a quorum, we can move to decided stage
+    {
+      post_state: s,
+      effects: Set(choreo::TriggerEvent({ kind: PreCommitTimeout, round: s.round }))
+    }
+  }
+
+  pure def listen_proposal_in_prevote_commit(ctx: LocalContext): Set[Transition] = {
     val s = ctx.state
     val messages = ctx.messages
 
@@ -308,6 +331,12 @@ module tendermint {
         pv.id == Some(id(p.proposal))
       }).map(pv => pv.src).size() >= 2 * F + 1
     })
+
+    enabled_proposals.map(p => upon_proposal_in_prevote_commit(ctx, p))
+  }
+
+  pure def upon_proposal_in_prevote_commit(ctx: LocalContext, p: ProposeMsg): Transition = {
+    val s = ctx.state
 
     def effect_builder = (p) => {
       if (s.stage == PreVoteStage) {
@@ -340,13 +369,13 @@ module tendermint {
       }
     }
 
-    enabled_proposals.map(p => {
+    {
       post_state: state_builder(p),
       effects: effect_builder(p)
-    })
+    }
   }
 
-  pure def upon_proposal_in_precommit_no_decision(ctx: LocalContext): Set[Transition] = {
+  pure def listen_proposal_in_precommit_no_decision(ctx: LocalContext): Set[Transition] = {
     val s = ctx.state
     val messages = ctx.messages
 
@@ -372,19 +401,21 @@ module tendermint {
       }).map(pc => pc.src).size() >= 2 * F + 1
     })
 
-    def state_builder = (p) => {
-      // Make decision and move to decided stage
-      {
+    enabled_proposals.map(p => upon_proposal_in_precommit_no_decision(ctx, p))
+  }
+
+  pure def upon_proposal_in_precommit_no_decision(ctx: LocalContext, p: ProposeMsg): Transition = {
+    val s = ctx.state
+
+    // Make decision and move to decided stage
+    {
+      post_state: {
         ...s,
         decision: Some(p.proposal),
         stage: DecidedStage
-      }
-    }
-
-    enabled_proposals.map(p => {
-      post_state: state_builder(p),
+      },
       effects: Set()  // No effects needed for decision
-    })
+    }
   }
 
   pure def on_propose_timeout(ctx: LocalContext): Set[Transition] = {
@@ -447,12 +478,12 @@ module tendermint {
   pure def main_listener(ctx: LocalContext): Set[Transition] =
     Set(
       listen_proposal_in_propose(ctx),
-      upon_proposal_in_propose_prevote(ctx),
-      upon_proposal_in_precommit_no_decision(ctx),
-      upon_proposal_in_prevote_commit(ctx),
-      upon_quorum_prevotes_any(ctx),
-      upon_quorum_nil_prevotes(ctx),
-      upon_quorum_precommits_any(ctx),
+      listen_proposal_in_propose_prevote(ctx),
+      listen_proposal_in_precommit_no_decision(ctx),
+      listen_proposal_in_prevote_commit(ctx),
+      listen_quorum_prevotes_any(ctx),
+      listen_quorum_nil_prevotes(ctx),
+      listen_quorum_precommits_any(ctx),
       on_propose_timeout(ctx),
       on_prevote_timeout(ctx),
       on_precommit_timeout(ctx)
@@ -625,6 +656,9 @@ module tendermint {
   action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
     choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
 
+  action step_deterministic(v: Node, listener: LocalContext => Transition): bool =
+    choreo::step_deterministic(v, listener, (c, _) => c, (e, p) => e)
+
   action step_with_filter(
     v: Node,
     listener: LocalContext => Set[Transition],
@@ -657,13 +691,12 @@ module valid {
   ).*
 
   run line28Test = init
-    .then(step_with("p1", upon_proposal_in_propose))
-    .then(step_with("p2", upon_proposal_in_propose))
-    .then(step_with("p1", upon_quorum_prevotes_any))
-    .then(step_with("p2", upon_quorum_prevotes_any))
+    .then(step_with("p1", listen_proposal_in_propose))
+    .then(step_with("p2", listen_proposal_in_propose))
 
-    .then(step_with("p2", upon_quorum_precommits_any))
-    .then(step_with("p2", upon_proposal_in_prevote_commit))
+    .then(step_with("p2", listen_quorum_precommits_any))
+
+    .then(step_with("p2", listen_proposal_in_prevote_commit))
     .then(step_with("p2", on_precommit_timeout))
     // p2 starts a new round
     .expect(s.system.get("p2").round == 1)
@@ -678,7 +711,7 @@ module valid {
 
     // Which enables line 28 to be called by p2, as it is in propose stage and can receive
     // the new proposal with valid_round 0.
-    .then(step_with("p2", upon_proposal_in_propose_prevote))
+    .then(step_with("p2", listen_proposal_in_propose_prevote))
 }
 
 module no_agreement {
@@ -693,39 +726,29 @@ module no_agreement {
   ).*
 
   run disagreementTest = init
-    // There are several byzantine proposals. Lose the ones we don't want to consume
-    .then("p1".lose_messages(
-      ms => ms.get_proposals().filter(p => p.proposal != "v0").map(p => Propose(p))
-    ))
-    .then("p2".lose_messages(
-      ms => ms.get_proposals().filter(p => p.proposal != "v1").map(p => Propose(p))
-    ))
-
     // p1 reacts to the byzantine proposal for v0
-    .then(step_with("p1", upon_proposal_in_propose))
+    .then(step_deterministic("p1", (ctx) =>
+      upon_proposal_in_propose(ctx, { proposal: "v0", round: 0, src: "p3", valid_round: -1 })
+    ))
     // p2 reacts to the byzantine proposal for v1
-    .then(step_with("p2", upon_proposal_in_propose))
+    .then(step_deterministic("p2", (ctx) =>
+      upon_proposal_in_propose(ctx, { proposal: "v1", round: 0, src: "p3", valid_round: -1 })
+    ))
 
-    // Partitioning: p1 and p2 lose each other's messages
-    .then("p1".lose_messages(ms => ms.filter(m => m.source() == "p2")))
-    .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
-
-    // p1 doesn't see the prevote from p2, but there are enough prevotes without it
-    .then(step_with("p1", upon_quorum_prevotes_any))
-    // p2 doesn't see the prevote from p1, but there are enough prevotes without it
-    .then(step_with("p2", upon_quorum_prevotes_any))
-
-    // Partitioning: p1 and p2 lose each other's messages
-    .then("p1".lose_messages(ms => ms.filter(m => m.source() == "p2")))
-    .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
-
-    // p1 doesn't see the precommit from p2, but there are enough precommits without it
-    .then(step_with("p1", upon_proposal_in_prevote_commit))
-    // p2 doesn't see the precommit from p1, but there are enough precommits without it
-    .then(step_with("p2", upon_proposal_in_prevote_commit))
+    // Counting the byzantine prevotes, both p1 and p2 have quorum for different values
+    .then(step_deterministic("p1", (ctx) =>
+      upon_proposal_in_prevote_commit(ctx, { proposal: "v0", round: 0, src: "p3", valid_round: -1 })
+    ))
+    .then(step_deterministic("p2", (ctx) =>
+      upon_proposal_in_prevote_commit(ctx, { proposal: "v1", round: 0, src: "p3", valid_round: -1 })
+    ))
 
     // Now we just take the final steps towards decision
-    .then(step_with("p1", upon_proposal_in_precommit_no_decision))
-    .then(step_with("p2", upon_proposal_in_precommit_no_decision))
+    .then(step_deterministic("p1", (ctx) =>
+      upon_proposal_in_precommit_no_decision(ctx, { proposal: "v0", round: 0, src: "p3", valid_round: -1 })
+    ))
+    .then(step_deterministic("p2", (ctx) =>
+      upon_proposal_in_precommit_no_decision(ctx, { proposal: "v1", round: 0, src: "p3", valid_round: -1 })
+    ))
     .expect(not(agreement))
 }
