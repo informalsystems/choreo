@@ -41,11 +41,11 @@ module choreo {
   type Listener[p, s, m, e, ce, ext] =
     (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, e, ce]]
 
-  // Only needed for granular_step
+  // Only needed for micro_step
   type Input[m, e] = Message(m) | Event(e)
 
-  // Only needed for granular_step
-  type GranularListener[p, s, m, e, ce, ext] =
+  // Only needed for micro_step
+  type MicroListener[p, s, m, e, ce, ext] =
     (LocalContext[p, s, m, e, ext], Input[m, e]) => Set[Transition[p, s, m, e, ce]]
 
   type EffectProcessor[p, s, m, e, ce, ext] =
@@ -143,8 +143,8 @@ module choreo {
     process_transitions(v, transitions, apply_custom_effect)
   }
 
-  action granular_step(
-    listener: GranularListener[p, s, m, e, ce, extensions],
+  action micro_step(
+    listener: MicroListener[p, s, m, e, ce, extensions],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
   ): bool = {
