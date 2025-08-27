@@ -444,19 +444,14 @@ module monadbft {
 
   //------------------------------------------ Transition Listeners ------------------------------------------
 
-  pure def listen_proposal(context: LocalContext): Set[Transition] = {
-    val ls = context.state
+  pure def all_upon_proposal(ls: LocalState, context: LocalContext): Set[Transition] = {
     val props_messages = get_proposals(context.messages)
-
-    props_messages.map(p => upon_proposal(context, p))
-  }
-
-  pure def upon_proposal(context: LocalContext, p: Proposal): Transition = {
-    val ls = context.state
     val props_mock = context.extensions.proposals_mock
     val ancestors_mock = context.extensions.ancestors_mock
 
-    handle_proposal(ls, p, props_mock, ancestors_mock)
+    props_messages.map(p => {
+      handle_proposal(ls, p, props_mock, ancestors_mock)
+    })
   }
 
   //
@@ -464,8 +459,8 @@ module monadbft {
   // Consensus for Validator i
   //
 
-  pure def listen_leader_vote_quorum(context: LocalContext): Set[Transition] = {
-    val ls = context.state
+  /// Alg 2 line 3 (Only for the leader)
+  pure def leader_upon_vote_quorum(ls: LocalState, context: LocalContext): Set[Transition] = {
     val votes_messages = get_votes(context.messages)
     val valid_votes = votes_messages.filter(v => v.view >= ls.curView)
     // Group votes by proposal ID
@@ -474,31 +469,28 @@ module monadbft {
       .values()
       .filterMap(s => build_qc(s, ls.process_id, state_hash(ls)))
 
-    quorums.filter(qc => {
-      val new_s = increment_view(qc.view, ls)
-      new_s.post_state.am_i_leader()
-    }).map(qc => upon_leader_vote_quorum(context, qc))
-  }
+    quorums.filterMap(qc => {
+      pure val new_s = increment_view(qc.view, ls)
 
-  pure def upon_leader_vote_quorum(context: LocalContext, qc: QC): Transition = {
-    val ls = context.state
-    val new_s = increment_view(qc.view, ls)
+      // Skip this quorum if I'm not the leader in the new view
+      if (not(new_s.post_state.am_i_leader())) None else
 
-    new_s.and_then(s => {
-      val new_block = build_block(qc, BLOCK_PAYLOAD)
-      val p = build_proposal(s.curView, new_block, None, None, s.process_id)
-        {
-          post_state: s,
-          effects: Set(
-            choreo::Broadcast(Prop(p)),
-            choreo::CustomEffect(LogProposal(p))
-          )
-        }
+      Some(new_s.and_then(s => {
+        val new_block = build_block(qc, BLOCK_PAYLOAD)
+        val p = build_proposal(s.curView, new_block, None, None, s.process_id)
+          {
+            post_state: s,
+            effects: Set(
+              choreo::Broadcast(Prop(p)),
+              choreo::CustomEffect(LogProposal(p))
+            )
+          }
+      }))
     })
   }
 
-  pure def listen_leader_timeout_quorum(context: LocalContext): Set[Transition] = {
-    val ls = context.state
+  pure def leader_upon_timeout_quorum(ls: LocalState, context: LocalContext): Set[Transition] = {
+    val mock_proposals = context.extensions.proposals_mock
     val timeouts_messages = get_timeouts(context.messages)
     val valid_timeouts = timeouts_messages.filter(t => t.view >= ls.curView)
 
@@ -507,16 +499,10 @@ module monadbft {
       .values()
       .map(s => handle_timeouts(acc_timeouts(ls, s), s))
       .filter(r => r._1.post_state.am_i_leader())
-      .map(pair => upon_leader_timeout_quorum(context, pair._1, pair._2))
+      .map(pair => post_handle_timeouts(pair._1, pair._2, mock_proposals))
   }
 
-  pure def upon_leader_timeout_quorum(context: LocalContext, tr: Transition, tc: Option[TC]): Transition = {
-    val mock_proposals = context.extensions.proposals_mock
-    post_handle_timeouts(tr, tc, mock_proposals)
-  }
-
-  pure def listen_timeout_quorum(context: LocalContext): Set[Transition] = {
-    val ls = context.state
+  pure def all_upon_timeout_quorum(ls: LocalState, context: LocalContext): Set[Transition] = {
     val timeouts_messages = get_timeouts(context.messages)
     val valid_timeouts = timeouts_messages.filter(t => t.view >= ls.curView)
 
@@ -525,36 +511,25 @@ module monadbft {
       .values()
       .map(s => handle_timeouts(acc_timeouts(ls, s), s)._1)
       .filter(r => not(r.post_state.am_i_leader()))
-      .map(tr => upon_timeout_quorum(context, tr))
   }
 
-  pure def upon_timeout_quorum(context: LocalContext, tr: Transition): Transition = {
-    tr
-  }
-
-  pure def listen_timeout_event(context: LocalContext): Set[Transition] = {
-    val ls = context.state
+  pure def upon_timeout_event(ls: LocalState, context: LocalContext): Set[Transition] = {
     val timeout_events = get_timeout_events(context.events)
 
     timeout_events
       .filter(t => t >= ls.curView)
-      .map(t => upon_timeout_event(context, t))
-  }
-
-  pure def upon_timeout_event(context: LocalContext, t: View): Transition = {
-    val ls = context.state
-    trigger_timeout_event(ls)
+      .map(t => trigger_timeout_event(ls))
   }
 
   pure def main_listener(
     context: LocalContext
   ): Set[Transition] =
     Set(
-      listen_proposal(context),
-      listen_leader_vote_quorum(context),
-      listen_leader_timeout_quorum(context),
-      listen_timeout_quorum(context),
-      listen_timeout_event(context)
+      all_upon_proposal(context.state, context),
+      leader_upon_vote_quorum(context.state, context),
+      leader_upon_timeout_quorum(context.state, context),
+      all_upon_timeout_quorum(context.state, context),
+      upon_timeout_event(context.state, context)
     ).flatten()
 
   // ------------------------------------------- Effect Application -------------------------------------------
