@@ -638,6 +638,7 @@ module monadbft {
     extensions: initial_extensions,
   })
 
+  // micro_step
   action step = choreo::granular_step(
     main_listener,
     apply_custom_effect,

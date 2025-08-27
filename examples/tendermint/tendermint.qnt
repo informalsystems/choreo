@@ -54,7 +54,7 @@ module tendermint {
 
   type CustomEffects = ()
   type Event = TimeoutEvent
-  type Extensions = Bookkeeping
+  type Extensions = ()
 
   /* Boilerplate */
   type LocalState = choreo::LocalState[Node, StateFields]
@@ -106,8 +106,8 @@ module tendermint {
 
   pure def id(v: Value): ValueId = { hashed: v }
 
-  pure def start_round(input: LocalContext, round: Round): Transition = {
-    val s = input.state
+  pure def start_round(ctx: LocalContext, round: Round): Transition = {
+    val s = ctx.state
 
     pure val effect =
       if (s.process_id == PROPOSER.get(round)) {
@@ -134,9 +134,9 @@ module tendermint {
     }
   }
 
-  pure def upon_proposal_in_propose(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def listen_proposal_in_propose(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.stage == ProposeStage
@@ -155,26 +155,30 @@ module tendermint {
       state_guard
     })
 
-    def effect_builder = (p) => {
-      // Broadcast the PreVote message for the proposal
-      if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
-        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
-      } else {
-        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
-      }
-    }
-
     // Map the enabled proposals to effects and the corresponding state updates
-    enabled_proposals.map(p => {
-      post_state: { ...s, stage: PreVoteStage},
-      effects: effect_builder(p)
-      // TODO -> add timeout and logging effects
-    })
+    enabled_proposals.map(p => upon_proposal_in_propose(ctx, p))
   }
 
-  pure def upon_proposal_in_propose_prevote(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def upon_proposal_in_propose(ctx: LocalContext, p: ProposeMsg): Set[Transition] = {
+    val s = ctx.state
+
+    // Broadcast the PreVote message for the proposal
+    pure val effects = if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
+    } else {
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
+    }
+
+    // TODO -> add timeout and logging effects
+    {
+      post_state: { ...s, stage: PreVoteStage },
+      effetcs: effects
+    }
+  }
+
+  pure def upon_proposal_in_propose_prevote(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.stage == ProposeStage,
@@ -212,9 +216,9 @@ module tendermint {
   }
 
 
-  pure def upon_quorum_prevotes_any(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def upon_quorum_prevotes_any(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     // Do we have a quorum of PreVotes in the current round
     def message_guard = (pv) => (pv.round == s.round)
@@ -233,9 +237,9 @@ module tendermint {
     }
   }
 
-  pure def upon_quorum_nil_prevotes(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def upon_quorum_nil_prevotes(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.stage == PreVoteStage,
@@ -258,9 +262,9 @@ module tendermint {
     }
   }
 
-  pure def upon_quorum_precommits_any(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def upon_quorum_precommits_any(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     // Do we have a quorum of PreCommits in the current round
     def message_guard = (pc) => (pc.round == s.round)
@@ -279,9 +283,9 @@ module tendermint {
     }
   }
 
-  pure def upon_proposal_in_prevote_commit(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def upon_proposal_in_prevote_commit(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.stage.in(Set(PreVoteStage, PreCommitStage))
@@ -342,9 +346,9 @@ module tendermint {
     })
   }
 
-  pure def upon_proposal_in_precommit_no_decision(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def upon_proposal_in_precommit_no_decision(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.decision == None
@@ -383,10 +387,10 @@ module tendermint {
     })
   }
 
-  pure def on_propose_timeout(input: LocalContext): Set[Transition] = {
-    val s = input.state
+  pure def on_propose_timeout(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
 
-    val candidates = input.events.filter(t => t.round >= s.round and t.kind == ProposeTimeout)
+    val candidates = ctx.events.filter(t => t.round >= s.round and t.kind == ProposeTimeout)
     val guard = and {
       candidates.size() > 0,
       s.stage == ProposeStage,
@@ -404,10 +408,10 @@ module tendermint {
       Set()
   }
 
-  pure def on_prevote_timeout(input: LocalContext): Set[Transition] = {
-    val s = input.state
+  pure def on_prevote_timeout(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
 
-    val candidates = input.events.filter(t => t.round >= s.round and t.kind == PreVoteTimeout)
+    val candidates = ctx.events.filter(t => t.round >= s.round and t.kind == PreVoteTimeout)
     val guard = and {
       candidates.size() > 0,
       s.stage == PreVoteStage,
@@ -425,33 +429,33 @@ module tendermint {
       Set()
   }
 
-  pure def on_precommit_timeout(input: LocalContext): Set[Transition] = {
-    val s = input.state
+  pure def on_precommit_timeout(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
 
-    val candidates = input.events.filter(t => t.round >= s.round and t.kind == PreCommitTimeout)
+    val candidates = ctx.events.filter(t => t.round >= s.round and t.kind == PreCommitTimeout)
     val guard = and {
       candidates.size() > 0,
       s.stage == PreCommitStage,
     }
 
     if (guard)
-      Set(start_round(input, s.round + 1))
+      Set(start_round(ctx, s.round + 1))
     else
       Set()
   }
 
-  pure def main_listener(input: LocalContext): Set[Transition] =
+  pure def main_listener(ctx: LocalContext): Set[Transition] =
     Set(
-      upon_proposal_in_propose(input),
-      upon_proposal_in_propose_prevote(input),
-      upon_proposal_in_precommit_no_decision(input),
-      upon_proposal_in_prevote_commit(input),
-      upon_quorum_prevotes_any(input),
-      upon_quorum_nil_prevotes(input),
-      upon_quorum_precommits_any(input),
-      on_propose_timeout(input),
-      on_prevote_timeout(input),
-      on_precommit_timeout(input)
+      listen_proposal_in_propose(ctx),
+      upon_proposal_in_propose_prevote(ctx),
+      upon_proposal_in_precommit_no_decision(ctx),
+      upon_proposal_in_prevote_commit(ctx),
+      upon_quorum_prevotes_any(ctx),
+      upon_quorum_nil_prevotes(ctx),
+      upon_quorum_precommits_any(ctx),
+      on_propose_timeout(ctx),
+      on_prevote_timeout(ctx),
+      on_precommit_timeout(ctx)
     ).flatten()
 
   pure val initial_message =
