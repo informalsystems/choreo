@@ -41,6 +41,9 @@ module choreo {
   type Listener[p, s, m, e, ce, ext] =
     (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, e, ce]]
 
+  type DeterministicListener[p, s, m, e, ce, ext] =
+    (LocalContext[p, s, m, e, ext]) => Transition[p, s, m, e, ce]
+
   // Only needed for micro_step
   type Input[m, e] = Message(m) | Event(e)
 
@@ -170,6 +173,17 @@ module choreo {
   ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
+    process_transitions(v, transitions, apply_custom_effect)
+  }
+
+  action step_deterministic(
+    v: p,
+    listener: DeterministicListener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+  ): bool = {
+    val input = convert_context(s, v, local_to_global_extensions)
+    val transitions = Set(listener(input)).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     process_transitions(v, transitions, apply_custom_effect)
   }
 
