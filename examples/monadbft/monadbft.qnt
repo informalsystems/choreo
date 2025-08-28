@@ -1,5 +1,8 @@
 // -*- mode: Bluespec; -*-
 
+// Run with:
+// quint run instance.qnt --max-steps 50 --invariant missing_tip_w --hide monadbft::choreo::s
+
 module monadbft {
   import basicSpells.* from "../../spells/basicSpells"
   import rareSpells.* from "../../spells/rareSpells"
@@ -606,18 +609,18 @@ module monadbft {
   }
 
   // Initialization depends on the instance, so we make it parameterized
-  action init_from(initialize_process, initial_messages, initial_extensions) = choreo::init({
+  action init_from(initialize_process, initial_messages, initial_extensions) = choreo::init_with_displayer({
     system: validators.mapBy(v => initialize_process(v)),
     messages: validators.mapBy(v => initial_messages),
     events: validators.mapBy(v => Set()),
     extensions: initial_extensions,
-  })
+  }, displayer)
 
-  action step = choreo::step(
+  action step = choreo::step_with_displayer(
     main_listener,
     apply_custom_effect,
-    (e, p) => e
-    // displayer,
+    (e, p) => e,
+    displayer
   )
 
   // ------------------------------------------- Invariants and Witnesses -------------------------------------------

@@ -60,6 +60,15 @@ module choreo {
     | TriggerEvent(e)
     | CustomEffect(ce)
 
+  /// A displayer is a function that takes a global context and returns a displayable representation of it.
+  /// This is used to visualize the state of the system for debugging or monitoring purposes.
+  /// After type instantiation, it should have the following signature:
+  /// ```
+  /// (Environment) => Display
+  /// ```
+  /// The display type can be anything.
+  type Displayer[p, s, m, e, ext, d] = (GlobalContext[p, s, m, e, ext]) => d
+
   pure def apply_effect(
     env: GlobalContext[p, s, m, e, ext],
     v: p,
@@ -88,6 +97,7 @@ module choreo {
 
   const processes: Set[p]
   var s: GlobalContext[p, s, m, e, ext]
+  var display: d
 
   pure def initialize(x: a, f: Option[(a) => Set[b]]): Set[b] = {
     match f {
@@ -125,22 +135,62 @@ module choreo {
       s' = post_env
     }
 
-  // TODO: displayer
+  action process_transitions_with_displayer(
+    v: p,
+    transitions: Set[Transition[p, s, m, e, ce]],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    displayer: Displayer[p, s, m, e, extensions, d],
+  ): bool =
+    // FIXME: Quint was supposed to detect determinism alone
+    if (transitions.size() == 1) {
+      val transition = transitions.getOnlyElement()
+      val post_env = apply_effect(s, v, transition, apply_custom_effect)
+      all {
+        s' = post_env,
+        display' = displayer(post_env),
+      }
+    } else {
+      nondet transition = oneOf(transitions)
+      val post_env = apply_effect(s, v, transition, apply_custom_effect)
+      all {
+        s' = post_env,
+        display' = displayer(post_env),
+      }
+    }
 
-  action init(e: GlobalContext[p, s, m , e, ext]): bool = {
-    s' = e
+  action init(ctx: GlobalContext[p, s, m , e, ext]): bool = {
+    s' = ctx
+  }
+
+  action init_with_displayer(
+    ctx: GlobalContext[p, s, m , e, ext],
+    displayer: Displayer[p, s, m, e, extensions, d],
+  ): bool = all {
+    s' = ctx,
+    display' = displayer(ctx)
   }
 
   action step(
     listener: Listener[p, s, m, e, l, extensions],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
-    // displayer: Displayer[p, s, m, te, l, extensions, d],
   ): bool = {
     nondet v = oneOf(processes)
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     process_transitions(v, transitions, apply_custom_effect)
+  }
+
+  action step_with_displayer(
+    listener: Listener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    displayer: Displayer[p, s, m, e, extensions, d],
+  ): bool = {
+    nondet v = oneOf(processes)
+    val input = convert_context(s, v, local_to_global_extensions)
+    val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
+    process_transitions_with_displayer(v, transitions, apply_custom_effect, displayer)
   }
 
   action micro_step(
@@ -166,7 +216,6 @@ module choreo {
     listener: Listener[p, s, m, e, l, extensions],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
-    // displayer: Displayer[p, s, m, te, l, extensions, d],
   ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
@@ -179,7 +228,6 @@ module choreo {
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
     f: (Transition[p, s, m, e, ce]) => bool,
-    // displayer: Displayer[p, s, m, te, l, extensions, d],
   ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state).filter(f)
@@ -192,7 +240,6 @@ module choreo {
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
     f: Set[m] => Set[m],
-    // displayer: Displayer[p, s, m, te, l, extensions, d],
   ): bool = {
     val input = convert_context(s, v, local_to_global_extensions)
     val input1 = { ...input, messages: f(input.messages) }
