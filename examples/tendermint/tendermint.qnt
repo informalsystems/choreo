@@ -206,18 +206,16 @@ module tendermint {
   pure def upon_proposal_in_propose_prevote(ctx: LocalContext, p: ProposeMsg): Transition = {
     val s = ctx.state
 
-    def effect_builder = (p) => {
       // Broadcast the PreVote message for the proposal
-      if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
-        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
-      } else {
-        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
-      }
+    val effects = if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
+    } else {
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
     }
 
     {
       post_state: { ...s, stage: PreVoteStage },
-      effects: effect_builder(p)
+      effects: effects
     }
   }
 
@@ -338,40 +336,32 @@ module tendermint {
   pure def upon_proposal_in_prevote_commit(ctx: LocalContext, p: ProposeMsg): Transition = {
     val s = ctx.state
 
-    def effect_builder = (p) => {
-      if (s.stage == PreVoteStage) {
-        // If in prevote stage, broadcast precommit and move to precommit stage
-        Set(choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
-      } else {
-        // If already in precommit stage, just update valid value
-        Set()
-      }
-    }
-
-    def state_builder = (p) => {
-      if (s.stage == PreVoteStage) {
+    if (s.stage == PreVoteStage) {
+      // If in prevote stage, broadcast precommit and move to precommit stage
+      {
         // Move to precommit stage and update values
-        {
+        post_state: {
           ...s,
           stage: PreCommitStage,
           valid_value: Some(p.proposal),
           valid_round: s.round,
           locked_value: Some(p.proposal),
           locked_round: s.round
-        }
-      } else {
-        // Just update valid value if already in precommit
-        {
+        },
+        effects: Set(
+          choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) }))
+        )
+      }
+    } else {
+      // Just update valid value if already in precommit
+      {
+        post_state: {
           ...s,
           valid_value: Some(p.proposal),
           valid_round: s.round
-        }
+        },
+        effects: Set(),
       }
-    }
-
-    {
-      post_state: state_builder(p),
-      effects: effect_builder(p)
     }
   }
 
