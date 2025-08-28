@@ -5,6 +5,7 @@ module instance {
   import types.* from "types"
 
   import monadbft(validators = Set("v1", "v2", "v3", "v4"), F = 1).* from "monadbft"
+  // import monadbft(validators = Set("v1", "v2", "v3", "v4"), F = 1).* from "monadbftMicro"
 
   pure val sigs = range(0, 5).foldl(List(), (acc,v) => acc.append(leader_from_view(v)))
   pure val genesis_qc = {

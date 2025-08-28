@@ -593,14 +593,6 @@ module monadbft {
     { ...ctx, extensions: ext1 }
   }
 
-  pure def update_ancestors(ext: EnvExtensions, p: Proposal): EnvExtensions = {
-    val ancestors_mock = ext.ancestors_mock
-    val parent_ancestors = ancestors_mock.getOrElse(p.parent_id(), Set())
-    val ancestors_mock1 = ancestors_mock.put(p.proposal_id,
-      parent_ancestors.setAdd(p.parent_id()))
-    { ...ext, ancestors_mock: ancestors_mock1 }
-  }
-
   pure def apply_custom_effect(ctx: GlobalContext, effect: CustomEffects): GlobalContext = {
     match effect {
       | LogMessage(msg) => {
