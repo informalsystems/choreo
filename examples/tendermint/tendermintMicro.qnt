@@ -497,7 +497,7 @@ module tendermint {
     extensions: initial_bookkeeping
   })
 
-  action step = choreo::granular_step(
+  action step = choreo::micro_step(
     main_listener,
     apply_custom_effect,
     (e, p) => e, // env to local context

@@ -1,3 +1,5 @@
+// -*- mode: Bluespec; -*-
+
 module mocks {
   import basicSpells.* from "../../spells/basicSpells"
   import types.* from "types"
