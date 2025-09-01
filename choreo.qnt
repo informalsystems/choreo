@@ -231,27 +231,31 @@ module choreo {
     params.map(param => upon_fn(ctx, param))
   }
 
-  type RehearsalStep[p, s, m, e, ext, r, ce] = {
-    process: p,
-    listen_fn: (LocalContext[p, s, m, e, ext]) => Set[r],
-    params: r,
-    upon_fn: (LocalContext[p, s, m, e, ext], r) => Transition[p, s, m, e, ce]
-  }
+  type RehearsalStep[p, s, m, e, ext, r, ce] = (
+    p,
+    (LocalContext[p, s, m, e, ext]) => Set[r],
+    r,
+    (LocalContext[p, s, m, e, ext], r) => Transition[p, s, m, e, ce]
+  )
 
   action rehearse(
     steps: List[RehearsalStep[p, s, m, e, ext, r, ce]],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, ext],
     local_to_global_extensions: ExtensionsConverter[p, ext, local_ext]
   ): bool = {
-    steps.length().to(0).reps(i => {
+    steps.length().reps(i => {
       val step = steps[i]
-      val ctx = convert_context(s, step.process, local_to_global_extensions)
-      val valid_params = step.listen_fn(ctx)
-      val is_valid = valid_params.contains(step.params)
+      val process = step._1
+      val listen = step._2
+      val params = step._3
+      val upon_fn = step._4
+      val ctx = convert_context(s, process, local_to_global_extensions)
+      val valid_params = listen(ctx)
+      val is_valid = valid_params.contains(params)
       all {
         is_valid,
-        val transition = step.upon_fn(ctx, step.params)
-        val post_env = apply_effect(s, step.process, transition, apply_custom_effect)
+        val transition = upon_fn(ctx, params)
+        val post_env = apply_effect(s, process, transition, apply_custom_effect)
         s' = post_env
       }
     })
