@@ -640,9 +640,11 @@ module tendermint {
   action step_deterministic(v: Node, listener: LocalContext => Transition): bool =
     choreo::step_deterministic(v, listener, (c, _) => c, (e, p) => e)
 
-  action rehearse(steps) =
-    choreo::rehearse(steps, (c, _) => c, (e, p) => e
-  )
+  def with_cue(process, listen_fn, params) =
+    choreo::with_cue(process, listen_fn, params, (c, _) => c)
+
+  action perform(cue_ctx, upon_fn) =
+    choreo::perform(cue_ctx, upon_fn, (e, p) => e)
 
   action step_with_filter(
     v: Node,
@@ -710,18 +712,17 @@ module no_agreement {
     MAX_ROUND = 4
   ).*
 
-  run disagreementTest = init
-    .then(
-      val v0_proposal = { proposal: "v0", round: 0, src: "p3", valid_round: -1 }
-      val v1_proposal = { proposal: "v1", round: 0, src: "p3", valid_round: -1 }
-
-      rehearse([
-        ("p1", listen_proposal_in_propose, v0_proposal, broadcast_prevote_for_proposal),
-        ("p2", listen_proposal_in_propose, v1_proposal, broadcast_prevote_for_proposal),
-        ("p1", listen_proposal_in_prevote_commit, v0_proposal, lock_value_and_precommit),
-        ("p2", listen_proposal_in_prevote_commit, v1_proposal, lock_value_and_precommit),
-        ("p1", listen_proposal_in_precommit_no_decision, v0_proposal, decide_on_proposal),
-        ("p2", listen_proposal_in_precommit_no_decision, v1_proposal, decide_on_proposal)
-      ]))
-    .expect(not(agreement))
+  run disagreementTest = {
+    val v0_proposal = { proposal: "v0", round: 0, src: "p3", valid_round: -1 }
+    val v1_proposal = { proposal: "v1", round: 0, src: "p3", valid_round: -1 }
+    
+    init
+      .then("p1".with_cue(listen_proposal_in_propose, v0_proposal).perform(broadcast_prevote_for_proposal))
+      .then("p2".with_cue(listen_proposal_in_propose, v1_proposal).perform(broadcast_prevote_for_proposal))
+      .then("p1".with_cue(listen_proposal_in_prevote_commit, v0_proposal).perform(lock_value_and_precommit))
+      .then("p2".with_cue(listen_proposal_in_prevote_commit, v1_proposal).perform(lock_value_and_precommit))
+      .then("p1".with_cue(listen_proposal_in_precommit_no_decision, v0_proposal).perform(decide_on_proposal))
+      .then("p2".with_cue(listen_proposal_in_precommit_no_decision, v1_proposal).perform(decide_on_proposal))
+      .expect(not(agreement))
+  }
 }

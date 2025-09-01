@@ -231,33 +231,31 @@ module choreo {
     params.map(param => upon_fn(ctx, param))
   }
 
-  type RehearsalStep[p, s, m, e, ext, r, ce] = (
-    p,
-    (LocalContext[p, s, m, e, ext]) => Set[r],
-    r,
-    (LocalContext[p, s, m, e, ext], r) => Transition[p, s, m, e, ce]
-  )
+  type CueResult[p, s, m, e, ext, r] = CueOk({ ctx: LocalContext[p, s, m, e, ext], params: r }) | NoCue
 
-  action rehearse(
-    steps: List[RehearsalStep[p, s, m, e, ext, r, ce]],
-    apply_custom_effect: EffectProcessor[p, s, m, e, ce, ext],
+  def with_cue(
+    process: p,
+    listen_fn: (LocalContext[p, s, m, e, ext]) => Set[r],
+    params: r,
     local_to_global_extensions: ExtensionsConverter[p, ext, local_ext]
+  ): CueResult[p, s, m, e, ext, r] = {
+    val ctx = convert_context(s, process, local_to_global_extensions)
+    val valid_params = listen_fn(ctx)
+    val is_valid = valid_params.contains(params)
+    if (is_valid)
+      CueOk({ ctx: ctx, params: params })
+    else
+      NoCue
+  }
+
+  action perform(
+    cue_result: CueResult[p, s, m, e, ext, r],
+    upon_fn: (LocalContext[p, s, m, e, ext], r) => Transition[p, s, m, e, ce],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, ext],
   ): bool = {
-    steps.length().reps(i => {
-      val step = steps[i]
-      val process = step._1
-      val listen = step._2
-      val params = step._3
-      val upon_fn = step._4
-      val ctx = convert_context(s, process, local_to_global_extensions)
-      val valid_params = listen(ctx)
-      val is_valid = valid_params.contains(params)
-      all {
-        is_valid,
-        val transition = upon_fn(ctx, params)
-        val post_env = apply_effect(s, process, transition, apply_custom_effect)
-        s' = post_env
-      }
-    })
+    match cue_result {
+      | CueOk(cue) => process_transitions(cue.ctx.state.process_id, Set(upon_fn(cue.ctx, cue.params)), apply_custom_effect)
+      | NoCue => all { false, s' = s }
+    }
   }
 }
