@@ -201,7 +201,7 @@ module tendermint {
   pure def broadcast_prevote_with_validation(ctx: LocalContext, p: ProposeMsg): Transition = {
     val s = ctx.state
 
-      // Broadcast the PreVote message for the proposal
+    // Broadcast the PreVote message for the proposal
     val effects = if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
       Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
     } else {
@@ -253,7 +253,7 @@ module tendermint {
     // Do we have a quorum of PreVotes in the current round
     def message_guard = (pv) => (pv.round == s.round and pv.id == None)
     val prevotes = messages.get_pre_votes().filter(pv => message_guard(pv))
-    val quorum = prevotes.size() >= 2 * F + 1
+    val quorum = prevotes.map(m => m.src).size() >= 2 * F + 1
 
     if (quorum and state_guard) {
       Set(())
@@ -280,7 +280,7 @@ module tendermint {
     def message_guard = (pc) => (pc.round == s.round)
     val quorum = messages.get_pre_commits().filter(pc => and {
       message_guard(pc),
-    }).size() >= 2 * F + 1 // quorum size is F + 1
+    }).map(m => m.src).size() >= 2 * F + 1 // quorum size is F + 1
 
     if (quorum) {
       Set(())
@@ -677,28 +677,37 @@ module valid {
     MAX_ROUND = 4
   ).*
 
-  // run line28Test = init
-  //   .then(step_with("p1", listen_proposal_in_propose))
-  //   .then(step_with("p2", listen_proposal_in_propose))
+  run line28Test = {
+    val v0_proposal = { proposal: "v0", round: 0, src: "p1", valid_round: -1 }
 
-  //   .then(step_with("p2", listen_quorum_precommits_any))
+    init
+      .then("p1".with_cue(listen_proposal_in_propose, v0_proposal).perform(broadcast_prevote_for_proposal))
+      .then("p2".with_cue(listen_proposal_in_propose, v0_proposal).perform(broadcast_prevote_for_proposal))
 
-  //   .then(step_with("p2", listen_proposal_in_prevote_commit))
-  //   .then(step_with("p2", on_precommit_timeout))
-  //   // p2 starts a new round
-  //   .expect(s.system.get("p2").round == 1)
+      .then("p1".with_cue(listen_proposal_in_prevote_commit, v0_proposal).perform(lock_value_and_precommit))
+      .then("p2".with_cue(listen_proposal_in_prevote_commit, v0_proposal).perform(lock_value_and_precommit))
 
-  //   // since p2 is the proposer in the new round, it will propose the stored valid value
-  //   .expect(and {
-  //     s.system.get("p2").stage == ProposeStage,
-  //     s.messages.values().forall(ms => {
-  //       ms.contains(Propose({ src: "p2", round: 1, proposal: "v0", valid_round: 0 }))
-  //     })
-  //   })
+      .then("p2".with_cue(listen_quorum_precommits_any, ()).perform(trigger_precommit_timeout))
 
-  //   // Which enables line 28 to be called by p2, as it is in propose stage and can receive
-  //   // the new proposal with valid_round 0.
-  //   .then(step_with("p2", listen_proposal_in_propose_prevote))
+      .then(step_with("p2", on_precommit_timeout))
+      // p2 starts a new round
+      .expect(s.system.get("p2").round == 1)
+
+      // since p2 is the proposer in the new round, it will propose the stored valid value
+      .expect(and {
+        s.system.get("p2").stage == ProposeStage,
+        s.messages.values().forall(ms => {
+          ms.contains(Propose({ src: "p2", round: 1, proposal: "v0", valid_round: 0 }))
+        })
+      })
+
+      // Which enables line 28 to be called by p2, as it is in propose stage and can receive
+      // the new proposal with valid_round 0.
+      .then("p2"
+        .with_cue(listen_proposal_in_propose_prevote, { proposal: "v0", round: 1, src: "p2", valid_round: 0 })
+        .perform(broadcast_prevote_with_validation)
+      )
+  }
 }
 
 module no_agreement {
