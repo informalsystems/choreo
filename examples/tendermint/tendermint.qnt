@@ -52,9 +52,9 @@ module tendermint {
     | PreVote(PreVoteMsg)
     | PreCommit(PreVoteMsg)
 
-  type CustomEffects = ()
+  type CustomEffects = CollectEvidence(Message)
   type Event = TimeoutEvent
-  type Extensions = ()
+  type Extensions = Bookkeeping
 
   /* Boilerplate */
   type LocalState = choreo::LocalState[Node, StateFields]
@@ -161,9 +161,15 @@ module tendermint {
 
     // Broadcast the PreVote message for the proposal
     pure val effects = if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
-      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
+      Set(
+        choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })),
+        choreo::CustomEffect(CollectEvidence(Propose(p)))
+      )
     } else {
-      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
+      Set(
+        choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
+        choreo::CustomEffect(CollectEvidence(Propose(p)))
+      )
     }
 
     // TODO -> add timeout and logging effects
@@ -203,9 +209,15 @@ module tendermint {
 
     // Broadcast the PreVote message for the proposal
     val effects = if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
-      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
+      Set(
+        choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})),
+        choreo::CustomEffect(CollectEvidence(Propose(p)))
+      )
     } else {
-      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
+      Set(
+        choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
+        choreo::CustomEffect(CollectEvidence(Propose(p)))
+      )
     }
 
     {
@@ -268,7 +280,10 @@ module tendermint {
     // If we have a quorum, we can move to precommit stage
     {
       post_state: { ...s, stage: PreCommitStage },
-      effects: Set(choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
+      effects: Set(
+        choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })),
+        choreo::CustomEffect(CollectEvidence(PreVote({ src: s.process_id, round: s.round, id: None })))
+      )
     }
   }
 
@@ -342,7 +357,8 @@ module tendermint {
           locked_round: s.round
         },
         effects: Set(
-          choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) }))
+          choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })),
+          choreo::CustomEffect(CollectEvidence(Propose(p)))
         )
       }
     } else {
@@ -539,9 +555,22 @@ module tendermint {
     extensions: initial_bookkeeping
   })
 
+  def apply_custom_effect(env: GlobalContext, effect: CustomEffects): GlobalContext = {
+    match effect {
+      | CollectEvidence(msg) => {
+        pure val updated_bookkeeping = match msg {
+          | Propose(p) => { ...env.extensions, evidence_propose: env.extensions.evidence_propose.setAdd(p) }
+          | PreVote(p) => { ...env.extensions, evidence_prevote: env.extensions.evidence_prevote.setAdd(p) }
+          | PreCommit(p) => { ...env.extensions, evidence_precommit: env.extensions.evidence_precommit.setAdd(p) }
+        }
+        { ...env, extensions: updated_bookkeeping }
+      }
+    }
+  }
+
   action step = choreo::step(
     main_listener,
-    (c, _) => c,
+    apply_custom_effect,
     (e, p) => e, // env to local context
   )
 
@@ -611,7 +640,58 @@ module tendermint {
       s.system.values().map(v => v.stage).contains(DecidedStage)
     }
 
-  // TODO: properties, evidence
+  // Evidence-based properties
+  
+  pure def equivocation_in(n: Node, evidence: Set[{ src: Node, round: Round | other }]): bool = {
+    tuples(evidence, evidence).exists(((e1, e2)) => {
+      e1 != e2 and e1.src == n and e2.src == n and e1.round == e2.round
+    })
+  }
+
+  /// Equivocation by a node n
+  def equivocation_by(n: Node): bool = {
+    or {
+      n.equivocation_in(s.extensions.evidence_propose),
+      n.equivocation_in(s.extensions.evidence_prevote),
+      n.equivocation_in(s.extensions.evidence_precommit),
+    }
+  }
+
+  /// Amnesic behavior by a node n  
+  def amnesia_by(n: Node): bool = {
+    tuples(ROUNDS, ROUNDS).exists(((r1, r2)) => {
+      r1 < r2 and tuples(VALID_VALUES, VALID_VALUES).exists(((v1, v2)) => {
+        and {
+          v1 != v2,
+          s.extensions.evidence_propose.contains({
+            src: n, round: r1, proposal: v1, valid_round: r1
+          }),
+          s.extensions.evidence_propose.contains({
+            src: n, round: r2, proposal: v2, valid_round: r2
+          }),
+          ROUNDS.filter(r => r1 <= r and r < r2).forall(r => {
+            s.extensions.evidence_prevote.filter(m => {
+              m.round == r and m.id == Some(id(v2))
+            }).size() >= 2 * F + 1
+          }),
+        }
+      })
+    })
+  }
+
+  /// Validity: the decided block satisfies the predefined predicate valid().
+  val validity = correct_nodes.forall(s => s.decision.in(VALID_VALUES.map(v => Some(v)).setAdd(None)))
+
+  /// The protocol safety. Two cases are possible:
+  ///   1. There is no fork, that is, Agreement holds true.  
+  ///   2. A subset of faulty processes demonstrates equivocation or amnesia.
+  val accountability = or {
+    agreement,
+    FAULTY.powerset().exists(f => and {
+      f.size() >= F + 1,
+      f.forall(n => equivocation_by(n) or amnesia_by(n)),
+    })
+  }
 
   const F: int
   /// The set of correct processes
@@ -635,30 +715,30 @@ module tendermint {
   pure val VALID_VALUES = Set("v0", "v1", "v2")
 
   action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
-    choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
+    choreo::step_with(v, listener, apply_custom_effect, (e, p) => e)
 
   action step_deterministic(v: Node, listener: LocalContext => Transition): bool =
-    choreo::step_deterministic(v, listener, (c, _) => c, (e, p) => e)
+    choreo::step_deterministic(v, listener, apply_custom_effect, (e, p) => e)
 
   def with_cue(process, listen_fn, params) =
-    choreo::with_cue(process, listen_fn, params, (c, _) => c)
+    choreo::with_cue(process, listen_fn, params, (e, p) => e)
 
   action perform(cue_ctx, upon_fn) =
-    choreo::perform(cue_ctx, upon_fn, (e, p) => e)
+    choreo::perform(cue_ctx, upon_fn, apply_custom_effect)
 
   action step_with_filter(
     v: Node,
     listener: LocalContext => Set[Transition],
     f: Transition => bool
   ): bool =
-    choreo::step_with_filter(v, listener, (c, _) => c, (e, p) => e, f)
+    choreo::step_with_filter(v, listener, apply_custom_effect, (e, p) => e, f)
 
   action step_with_messages(
     v: Node,
     listener: LocalContext => Set[Transition],
     f: Set[Message] => Set[Message]
   ): bool =
-    choreo::step_with_messages(v, listener, (c, _) => c, (e, p) => e, f)
+    choreo::step_with_messages(v, listener, apply_custom_effect, (e, p) => e, f)
 
   action lose_messages = choreo::lose_messages
 
@@ -666,6 +746,9 @@ module tendermint {
 }
 
 module valid {
+  // quint run tendermint.qnt --main valid --invariant="agreement and validity and accountability"
+  // quint test tendermint.qnt --main valid
+
   import basicSpells.* from "../../spells/basicSpells"
 
   import tendermint(
@@ -711,6 +794,13 @@ module valid {
 }
 
 module no_agreement {
+  // Should fail:
+  // quint run tendermint.qnt --main no_agreement --invariants=agreement validity accountability
+  //
+  // Should succeed (accountability should still hold):
+  // quint run tendermint.qnt --main no_agreement --invariant=accountability
+  // quint test tendermint.qnt --main no_agreement
+
   import tendermint(
     F = 1,
     CORRECT = Set("p1", "p2"),
