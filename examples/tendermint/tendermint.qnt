@@ -161,21 +161,15 @@ module tendermint {
 
     // Broadcast the PreVote message for the proposal
     pure val effects = if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
-      Set(
-        choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })),
-        choreo::CustomEffect(CollectEvidence(Propose(p)))
-      )
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
     } else {
-      Set(
-        choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
-        choreo::CustomEffect(CollectEvidence(Propose(p)))
-      )
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
     }
 
     // TODO -> add timeout and logging effects
     {
       post_state: { ...s, stage: PreVoteStage },
-      effects: effects
+      effects: effects.setAdd(choreo::CustomEffect(CollectEvidence(Propose(p))))
     }
   }
 
@@ -206,23 +200,25 @@ module tendermint {
 
   pure def broadcast_prevote_with_validation(ctx: LocalContext, p: ProposeMsg): Transition = {
     val s = ctx.state
+    val messages = ctx.messages
+
+    // Collect evidence for prevotes that contributed to this decision
+    val contributing_prevotes = messages.get_pre_votes().filter(pv => 
+      pv.round == p.valid_round and pv.id == Some(id(p.proposal))
+    )
+    val prevote_evidence = contributing_prevotes.map(pv => choreo::CustomEffect(CollectEvidence(PreVote(pv))))
+    val evidence = Set(choreo::CustomEffect(CollectEvidence(Propose(p)))).union(prevote_evidence)
 
     // Broadcast the PreVote message for the proposal
     val effects = if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
-      Set(
-        choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})),
-        choreo::CustomEffect(CollectEvidence(Propose(p)))
-      )
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
     } else {
-      Set(
-        choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })),
-        choreo::CustomEffect(CollectEvidence(Propose(p)))
-      )
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
     }
 
     {
       post_state: { ...s, stage: PreVoteStage },
-      effects: effects
+      effects: effects.union(evidence)
     }
   }
 
@@ -276,14 +272,20 @@ module tendermint {
 
   pure def broadcast_nil_precommit(ctx: LocalContext, _params: ()): Transition = {
     val s = ctx.state
+    val messages = ctx.messages
+
+    // Collect evidence for all nil prevotes that enabled this decision
+    val nil_prevotes = messages.get_pre_votes().filter(pv => 
+      pv.round == s.round and pv.id == None
+    )
+    val prevote_evidence = nil_prevotes.map(pv => choreo::CustomEffect(CollectEvidence(PreVote(pv))))
 
     // If we have a quorum, we can move to precommit stage
     {
       post_state: { ...s, stage: PreCommitStage },
       effects: Set(
-        choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })),
-        choreo::CustomEffect(CollectEvidence(PreVote({ src: s.process_id, round: s.round, id: None })))
-      )
+        choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None }))
+      ).union(prevote_evidence)
     }
   }
 
@@ -343,6 +345,13 @@ module tendermint {
 
   pure def lock_value_and_precommit(ctx: LocalContext, p: ProposeMsg): Transition = {
     val s = ctx.state
+    val messages = ctx.messages
+
+    // Collect evidence for prevotes that enabled this decision
+    val enabling_prevotes = messages.get_pre_votes().filter(pv => 
+      pv.round == s.round and pv.id == Some(id(p.proposal))
+    )
+    val prevote_evidence = enabling_prevotes.map(pv => choreo::CustomEffect(CollectEvidence(PreVote(pv))))
 
     if (s.stage == PreVoteStage) {
       // If in prevote stage, broadcast precommit and move to precommit stage
@@ -359,7 +368,7 @@ module tendermint {
         effects: Set(
           choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })),
           choreo::CustomEffect(CollectEvidence(Propose(p)))
-        )
+        ).union(prevote_evidence)
       }
     } else {
       // Just update valid value if already in precommit
@@ -369,7 +378,7 @@ module tendermint {
           valid_value: Some(p.proposal),
           valid_round: s.round
         },
-        effects: Set(),
+        effects: Set(choreo::CustomEffect(CollectEvidence(Propose(p)))).union(prevote_evidence)
       }
     }
   }
@@ -403,6 +412,13 @@ module tendermint {
 
   pure def decide_on_proposal(ctx: LocalContext, p: ProposeMsg): Transition = {
     val s = ctx.state
+    val messages = ctx.messages
+
+    // Collect evidence for precommits that enabled this decision
+    val enabling_precommits = messages.get_pre_commits().filter(pc =>
+      pc.round == p.round and pc.id == Some(id(p.proposal))
+    )
+    val precommit_evidence = enabling_precommits.map(pc => choreo::CustomEffect(CollectEvidence(PreCommit(pc))))
 
     // Make decision and move to decided stage
     {
@@ -411,7 +427,7 @@ module tendermint {
         decision: Some(p.proposal),
         stage: DecidedStage
       },
-      effects: Set()  // No effects needed for decision
+      effects: Set(choreo::CustomEffect(CollectEvidence(Propose(p)))).union(precommit_evidence)
     }
   }
 
