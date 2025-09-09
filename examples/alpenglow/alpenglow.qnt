@@ -768,7 +768,7 @@ module too_many_byz {
   import basicSpells.* from "../../spells/basicSpells"
 
   // to violate agreement, run
-  // quint run alpenglow.qnt --main too_many_byz --step oneSlotNoTimeout --invariant agreement
+  // quint run alpenglow.qnt --main too_many_byz --invariant agreement
 
   import alpenglow(
     correct = Set("v1", "v2", "v3", "v4"),

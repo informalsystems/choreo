@@ -52,7 +52,7 @@ module tendermint {
     | PreVote(PreVoteMsg)
     | PreCommit(PreVoteMsg)
 
-  type CustomEffects = ()
+  type CustomEffects = CollectEvidence(Message)
   type Event = TimeoutEvent
   type Extensions = Bookkeeping
 
@@ -106,8 +106,8 @@ module tendermint {
 
   pure def id(v: Value): ValueId = { hashed: v }
 
-  pure def start_round(input: LocalContext, round: Round): Transition = {
-    val s = input.state
+  pure def start_round(ctx: LocalContext, round: Round): Transition = {
+    val s = ctx.state
 
     pure val effect =
       if (s.process_id == PROPOSER.get(round)) {
@@ -134,9 +134,9 @@ module tendermint {
     }
   }
 
-  pure def upon_proposal_in_propose(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def listen_proposal_in_propose(ctx: LocalContext): Set[ProposeMsg] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.stage == ProposeStage
@@ -150,31 +150,32 @@ module tendermint {
 
     // Apply Guards
     val proposals = messages.get_proposals()
-    val enabled_proposals = proposals.filter(p => and {
+    proposals.filter(p => and {
       message_guard(p),
       state_guard
     })
-
-    def effect_builder = (p) => {
-      // Broadcast the PreVote message for the proposal
-      if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
-        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
-      } else {
-        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
-      }
-    }
-
-    // Map the enabled proposals to effects and the corresponding state updates
-    enabled_proposals.map(p => {
-      post_state: { ...s, stage: PreVoteStage},
-      effects: effect_builder(p)
-      // TODO -> add timeout and logging effects
-    })
   }
 
-  pure def upon_proposal_in_propose_prevote(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def broadcast_prevote_for_proposal(ctx: LocalContext, p: ProposeMsg): Transition = {
+    val s = ctx.state
+
+    // Broadcast the PreVote message for the proposal
+    pure val effects = if (valid(p.proposal) and (s.locked_round == -1 or s.locked_value == Some(p.proposal))) {
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
+    } else {
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
+    }
+
+    // TODO -> add timeout and logging effects
+    {
+      post_state: { ...s, stage: PreVoteStage },
+      effects: effects.setAdd(choreo::CustomEffect(CollectEvidence(Propose(p))))
+    }
+  }
+
+  pure def listen_proposal_in_propose_prevote(ctx: LocalContext): Set[ProposeMsg] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.stage == ProposeStage,
@@ -192,29 +193,39 @@ module tendermint {
     })
 
     val pre_votes = messages.get_pre_votes()
-    val enabled_proposals = proposals.filter(p => and {
+    proposals.filter(p => and {
       pre_votes.filter(q => q.id == Some(p.proposal.id()) and q.round == p.valid_round).size() >= 2 * F + 1 // quorum size is F + 1
-    })
-
-    def effect_builder = (p) => {
-      // Broadcast the PreVote message for the proposal
-      if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
-        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
-      } else {
-        Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
-      }
-    }
-
-    enabled_proposals.map(p => {
-      post_state: { ...s, stage: PreVoteStage },
-      effects: effect_builder(p)
     })
   }
 
+  pure def broadcast_prevote_with_validation(ctx: LocalContext, p: ProposeMsg): Transition = {
+    val s = ctx.state
+    val messages = ctx.messages
 
-  pure def upon_quorum_prevotes_any(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+    // Collect evidence for prevotes that contributed to this decision
+    val contributing_prevotes = messages.get_pre_votes().filter(pv => 
+      pv.round == p.valid_round and pv.id == Some(id(p.proposal))
+    )
+    val prevote_evidence = contributing_prevotes.map(pv => choreo::CustomEffect(CollectEvidence(PreVote(pv))))
+    val evidence = Set(choreo::CustomEffect(CollectEvidence(Propose(p)))).union(prevote_evidence)
+
+    // Broadcast the PreVote message for the proposal
+    val effects = if (valid(p.proposal) and (s.locked_round <= p.valid_round or s.locked_value == Some(p.proposal))) {
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: Some(id(p.proposal))})))
+    } else {
+      Set(choreo::Broadcast(PreVote({ src: s.process_id, round: s.round, id: None })))
+    }
+
+    {
+      post_state: { ...s, stage: PreVoteStage },
+      effects: effects.union(evidence)
+    }
+  }
+
+
+  pure def listen_quorum_prevotes_any(ctx: LocalContext): Set[()] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     // Do we have a quorum of PreVotes in the current round
     def message_guard = (pv) => (pv.round == s.round)
@@ -223,19 +234,25 @@ module tendermint {
     }).size() >= 2 * F + 1 // quorum size is F + 1
 
     if (quorum) {
-      // If we have a quorum, we can move to precommit stage
-      Set({
-        post_state: s,
-        effects: Set(choreo::TriggerEvent({ kind: PreVoteTimeout, round: s.round }))
-      })
+      Set(())
     } else {
       Set()
     }
   }
 
-  pure def upon_quorum_nil_prevotes(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def trigger_prevote_timeout(ctx: LocalContext, _params: ()): Transition = {
+    val s = ctx.state
+
+    // If we have a quorum, we can move to precommit stage
+    {
+      post_state: s,
+      effects: Set(choreo::TriggerEvent({ kind: PreVoteTimeout, round: s.round }))
+    }
+  }
+
+  pure def listen_quorum_nil_prevotes(ctx: LocalContext): Set[()] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.stage == PreVoteStage,
@@ -244,44 +261,64 @@ module tendermint {
     // Do we have a quorum of PreVotes in the current round
     def message_guard = (pv) => (pv.round == s.round and pv.id == None)
     val prevotes = messages.get_pre_votes().filter(pv => message_guard(pv))
-    val quorum = prevotes.size() >= 2 * F + 1
+    val quorum = prevotes.map(m => m.src).size() >= 2 * F + 1
 
     if (quorum and state_guard) {
-      // If we have a quorum, we can move to precommit stage
-      val outputs = Set({
-        post_state: { ...s, stage: PreCommitStage },
-        effects: Set(choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None })))
-      })
-      outputs
+      Set(())
     } else {
       Set()
     }
   }
 
-  pure def upon_quorum_precommits_any(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def broadcast_nil_precommit(ctx: LocalContext, _params: ()): Transition = {
+    val s = ctx.state
+    val messages = ctx.messages
+
+    // Collect evidence for all nil prevotes that enabled this decision
+    val nil_prevotes = messages.get_pre_votes().filter(pv => 
+      pv.round == s.round and pv.id == None
+    )
+    val prevote_evidence = nil_prevotes.map(pv => choreo::CustomEffect(CollectEvidence(PreVote(pv))))
+
+    // If we have a quorum, we can move to precommit stage
+    {
+      post_state: { ...s, stage: PreCommitStage },
+      effects: Set(
+        choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: None }))
+      ).union(prevote_evidence)
+    }
+  }
+
+  pure def listen_quorum_precommits_any(ctx: LocalContext): Set[()] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     // Do we have a quorum of PreCommits in the current round
     def message_guard = (pc) => (pc.round == s.round)
     val quorum = messages.get_pre_commits().filter(pc => and {
       message_guard(pc),
-    }).size() >= 2 * F + 1 // quorum size is F + 1
+    }).map(m => m.src).size() >= 2 * F + 1 // quorum size is F + 1
 
     if (quorum) {
-      // If we have a quorum, we can move to decided stage
-      Set({
-        post_state: s,
-        effects: Set(choreo::TriggerEvent({ kind: PreCommitTimeout, round: s.round }))
-      })
+      Set(())
     } else {
       Set()
     }
   }
 
-  pure def upon_proposal_in_prevote_commit(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def trigger_precommit_timeout(ctx: LocalContext, _params: ()): Transition = {
+    val s = ctx.state
+
+    // If we have a quorum, we can move to decided stage
+    {
+      post_state: s,
+      effects: Set(choreo::TriggerEvent({ kind: PreCommitTimeout, round: s.round }))
+    }
+  }
+
+  pure def listen_proposal_in_prevote_commit(ctx: LocalContext): Set[ProposeMsg] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.stage.in(Set(PreVoteStage, PreCommitStage))
@@ -295,7 +332,7 @@ module tendermint {
     val proposals = messages.get_proposals()
     val pre_votes = messages.get_pre_votes()
 
-    val enabled_proposals = proposals.filter(p => and {
+    proposals.filter(p => and {
       message_guard(p),
       state_guard,
       // Check for quorum of prevotes for this proposal in current round
@@ -304,47 +341,51 @@ module tendermint {
         pv.id == Some(id(p.proposal))
       }).map(pv => pv.src).size() >= 2 * F + 1
     })
+  }
 
-    def effect_builder = (p) => {
-      if (s.stage == PreVoteStage) {
-        // If in prevote stage, broadcast precommit and move to precommit stage
-        Set(choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })))
-      } else {
-        // If already in precommit stage, just update valid value
-        Set()
-      }
-    }
+  pure def lock_value_and_precommit(ctx: LocalContext, p: ProposeMsg): Transition = {
+    val s = ctx.state
+    val messages = ctx.messages
 
-    def state_builder = (p) => {
-      if (s.stage == PreVoteStage) {
+    // Collect evidence for prevotes that enabled this decision
+    val enabling_prevotes = messages.get_pre_votes().filter(pv => 
+      pv.round == s.round and pv.id == Some(id(p.proposal))
+    )
+    val prevote_evidence = enabling_prevotes.map(pv => choreo::CustomEffect(CollectEvidence(PreVote(pv))))
+
+    if (s.stage == PreVoteStage) {
+      // If in prevote stage, broadcast precommit and move to precommit stage
+      {
         // Move to precommit stage and update values
-        {
+        post_state: {
           ...s,
           stage: PreCommitStage,
           valid_value: Some(p.proposal),
           valid_round: s.round,
           locked_value: Some(p.proposal),
           locked_round: s.round
-        }
-      } else {
-        // Just update valid value if already in precommit
-        {
+        },
+        effects: Set(
+          choreo::Broadcast(PreCommit({ src: s.process_id, round: s.round, id: Some(id(p.proposal)) })),
+          choreo::CustomEffect(CollectEvidence(Propose(p)))
+        ).union(prevote_evidence)
+      }
+    } else {
+      // Just update valid value if already in precommit
+      {
+        post_state: {
           ...s,
           valid_value: Some(p.proposal),
           valid_round: s.round
-        }
+        },
+        effects: Set(choreo::CustomEffect(CollectEvidence(Propose(p)))).union(prevote_evidence)
       }
     }
-
-    enabled_proposals.map(p => {
-      post_state: state_builder(p),
-      effects: effect_builder(p)
-    })
   }
 
-  pure def upon_proposal_in_precommit_no_decision(input: LocalContext): Set[Transition] = {
-    val s = input.state
-    val messages = input.messages
+  pure def listen_proposal_in_precommit_no_decision(ctx: LocalContext): Set[ProposeMsg] = {
+    val s = ctx.state
+    val messages = ctx.messages
 
     val state_guard = and {
       s.decision == None
@@ -358,7 +399,7 @@ module tendermint {
     val proposals = messages.get_proposals()
     val pre_commits = messages.get_pre_commits()
 
-    val enabled_proposals = proposals.filter(p => and {
+    proposals.filter(p => and {
       message_guard(p),
       state_guard,
       // Check for quorum of precommits for this proposal
@@ -367,26 +408,33 @@ module tendermint {
         pc.id == Some(id(p.proposal))
       }).map(pc => pc.src).size() >= 2 * F + 1
     })
+  }
 
-    def state_builder = (p) => {
-      // Make decision and move to decided stage
-      {
+  pure def decide_on_proposal(ctx: LocalContext, p: ProposeMsg): Transition = {
+    val s = ctx.state
+    val messages = ctx.messages
+
+    // Collect evidence for precommits that enabled this decision
+    val enabling_precommits = messages.get_pre_commits().filter(pc =>
+      pc.round == p.round and pc.id == Some(id(p.proposal))
+    )
+    val precommit_evidence = enabling_precommits.map(pc => choreo::CustomEffect(CollectEvidence(PreCommit(pc))))
+
+    // Make decision and move to decided stage
+    {
+      post_state: {
         ...s,
         decision: Some(p.proposal),
         stage: DecidedStage
-      }
+      },
+      effects: Set(choreo::CustomEffect(CollectEvidence(Propose(p)))).union(precommit_evidence)
     }
-
-    enabled_proposals.map(p => {
-      post_state: state_builder(p),
-      effects: Set()  // No effects needed for decision
-    })
   }
 
-  pure def on_propose_timeout(input: LocalContext): Set[Transition] = {
-    val s = input.state
+  pure def on_propose_timeout(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
 
-    val candidates = input.events.filter(t => t.round >= s.round and t.kind == ProposeTimeout)
+    val candidates = ctx.events.filter(t => t.round >= s.round and t.kind == ProposeTimeout)
     val guard = and {
       candidates.size() > 0,
       s.stage == ProposeStage,
@@ -404,10 +452,10 @@ module tendermint {
       Set()
   }
 
-  pure def on_prevote_timeout(input: LocalContext): Set[Transition] = {
-    val s = input.state
+  pure def on_prevote_timeout(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
 
-    val candidates = input.events.filter(t => t.round >= s.round and t.kind == PreVoteTimeout)
+    val candidates = ctx.events.filter(t => t.round >= s.round and t.kind == PreVoteTimeout)
     val guard = and {
       candidates.size() > 0,
       s.stage == PreVoteStage,
@@ -425,33 +473,33 @@ module tendermint {
       Set()
   }
 
-  pure def on_precommit_timeout(input: LocalContext): Set[Transition] = {
-    val s = input.state
+  pure def on_precommit_timeout(ctx: LocalContext): Set[Transition] = {
+    val s = ctx.state
 
-    val candidates = input.events.filter(t => t.round >= s.round and t.kind == PreCommitTimeout)
+    val candidates = ctx.events.filter(t => t.round >= s.round and t.kind == PreCommitTimeout)
     val guard = and {
       candidates.size() > 0,
       s.stage == PreCommitStage,
     }
 
     if (guard)
-      Set(start_round(input, s.round + 1))
+      Set(start_round(ctx, s.round + 1))
     else
       Set()
   }
 
-  pure def main_listener(input: LocalContext): Set[Transition] =
+  pure def main_listener(ctx: LocalContext): Set[Transition] =
     Set(
-      upon_proposal_in_propose(input),
-      upon_proposal_in_propose_prevote(input),
-      upon_proposal_in_precommit_no_decision(input),
-      upon_proposal_in_prevote_commit(input),
-      upon_quorum_prevotes_any(input),
-      upon_quorum_nil_prevotes(input),
-      upon_quorum_precommits_any(input),
-      on_propose_timeout(input),
-      on_prevote_timeout(input),
-      on_precommit_timeout(input)
+      choreo::cue(ctx, listen_proposal_in_propose, broadcast_prevote_for_proposal),
+      choreo::cue(ctx, listen_proposal_in_propose_prevote, broadcast_prevote_with_validation),
+      choreo::cue(ctx, listen_proposal_in_precommit_no_decision, decide_on_proposal),
+      choreo::cue(ctx, listen_proposal_in_prevote_commit, lock_value_and_precommit),
+      choreo::cue(ctx, listen_quorum_prevotes_any, trigger_prevote_timeout),
+      choreo::cue(ctx, listen_quorum_nil_prevotes, broadcast_nil_precommit),
+      choreo::cue(ctx, listen_quorum_precommits_any, trigger_precommit_timeout),
+      on_propose_timeout(ctx),
+      on_prevote_timeout(ctx),
+      on_precommit_timeout(ctx)
     ).flatten()
 
   pure val initial_message =
@@ -523,9 +571,22 @@ module tendermint {
     extensions: initial_bookkeeping
   })
 
+  def apply_custom_effect(env: GlobalContext, effect: CustomEffects): GlobalContext = {
+    match effect {
+      | CollectEvidence(msg) => {
+        pure val updated_bookkeeping = match msg {
+          | Propose(p) => { ...env.extensions, evidence_propose: env.extensions.evidence_propose.setAdd(p) }
+          | PreVote(p) => { ...env.extensions, evidence_prevote: env.extensions.evidence_prevote.setAdd(p) }
+          | PreCommit(p) => { ...env.extensions, evidence_precommit: env.extensions.evidence_precommit.setAdd(p) }
+        }
+        { ...env, extensions: updated_bookkeeping }
+      }
+    }
+  }
+
   action step = choreo::step(
     main_listener,
-    (c, _) => c,
+    apply_custom_effect,
     (e, p) => e, // env to local context
   )
 
@@ -595,7 +656,58 @@ module tendermint {
       s.system.values().map(v => v.stage).contains(DecidedStage)
     }
 
-  // TODO: properties, evidence
+  // Evidence-based properties
+  
+  pure def equivocation_in(n: Node, evidence: Set[{ src: Node, round: Round | other }]): bool = {
+    tuples(evidence, evidence).exists(((e1, e2)) => {
+      e1 != e2 and e1.src == n and e2.src == n and e1.round == e2.round
+    })
+  }
+
+  /// Equivocation by a node n
+  def equivocation_by(n: Node): bool = {
+    or {
+      n.equivocation_in(s.extensions.evidence_propose),
+      n.equivocation_in(s.extensions.evidence_prevote),
+      n.equivocation_in(s.extensions.evidence_precommit),
+    }
+  }
+
+  /// Amnesic behavior by a node n  
+  def amnesia_by(n: Node): bool = {
+    tuples(ROUNDS, ROUNDS).exists(((r1, r2)) => {
+      r1 < r2 and tuples(VALID_VALUES, VALID_VALUES).exists(((v1, v2)) => {
+        and {
+          v1 != v2,
+          s.extensions.evidence_propose.contains({
+            src: n, round: r1, proposal: v1, valid_round: r1
+          }),
+          s.extensions.evidence_propose.contains({
+            src: n, round: r2, proposal: v2, valid_round: r2
+          }),
+          ROUNDS.filter(r => r1 <= r and r < r2).forall(r => {
+            s.extensions.evidence_prevote.filter(m => {
+              m.round == r and m.id == Some(id(v2))
+            }).size() >= 2 * F + 1
+          }),
+        }
+      })
+    })
+  }
+
+  /// Validity: the decided block satisfies the predefined predicate valid().
+  val validity = correct_nodes.forall(s => s.decision.in(VALID_VALUES.map(v => Some(v)).setAdd(None)))
+
+  /// The protocol safety. Two cases are possible:
+  ///   1. There is no fork, that is, Agreement holds true.  
+  ///   2. A subset of faulty processes demonstrates equivocation or amnesia.
+  val accountability = or {
+    agreement,
+    FAULTY.powerset().exists(f => and {
+      f.size() >= F + 1,
+      f.forall(n => equivocation_by(n) or amnesia_by(n)),
+    })
+  }
 
   const F: int
   /// The set of correct processes
@@ -619,21 +731,30 @@ module tendermint {
   pure val VALID_VALUES = Set("v0", "v1", "v2")
 
   action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
-    choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
+    choreo::step_with(v, listener, apply_custom_effect, (e, p) => e)
+
+  action step_deterministic(v: Node, listener: LocalContext => Transition): bool =
+    choreo::step_deterministic(v, listener, apply_custom_effect, (e, p) => e)
+
+  def with_cue(process, listen_fn, params) =
+    choreo::with_cue(process, listen_fn, params, (e, p) => e)
+
+  action perform(cue_ctx, upon_fn) =
+    choreo::perform(cue_ctx, upon_fn, apply_custom_effect)
 
   action step_with_filter(
     v: Node,
     listener: LocalContext => Set[Transition],
     f: Transition => bool
   ): bool =
-    choreo::step_with_filter(v, listener, (c, _) => c, (e, p) => e, f)
+    choreo::step_with_filter(v, listener, apply_custom_effect, (e, p) => e, f)
 
   action step_with_messages(
     v: Node,
     listener: LocalContext => Set[Transition],
     f: Set[Message] => Set[Message]
   ): bool =
-    choreo::step_with_messages(v, listener, (c, _) => c, (e, p) => e, f)
+    choreo::step_with_messages(v, listener, apply_custom_effect, (e, p) => e, f)
 
   action lose_messages = choreo::lose_messages
 
@@ -641,6 +762,9 @@ module tendermint {
 }
 
 module valid {
+  // quint run tendermint.qnt --main valid --invariant="agreement and validity and accountability"
+  // quint test tendermint.qnt --main valid
+
   import basicSpells.* from "../../spells/basicSpells"
 
   import tendermint(
@@ -652,32 +776,47 @@ module valid {
     MAX_ROUND = 4
   ).*
 
-  run line28Test = init
-    .then(step_with("p1", upon_proposal_in_propose))
-    .then(step_with("p2", upon_proposal_in_propose))
-    .then(step_with("p1", upon_quorum_prevotes_any))
-    .then(step_with("p2", upon_quorum_prevotes_any))
+  run line28Test = {
+    val v0_proposal = { proposal: "v0", round: 0, src: "p1", valid_round: -1 }
 
-    .then(step_with("p2", upon_quorum_precommits_any))
-    .then(step_with("p2", upon_proposal_in_prevote_commit))
-    .then(step_with("p2", on_precommit_timeout))
-    // p2 starts a new round
-    .expect(s.system.get("p2").round == 1)
+    init
+      .then("p1".with_cue(listen_proposal_in_propose, v0_proposal).perform(broadcast_prevote_for_proposal))
+      .then("p2".with_cue(listen_proposal_in_propose, v0_proposal).perform(broadcast_prevote_for_proposal))
 
-    // since p2 is the proposer in the new round, it will propose the stored valid value
-    .expect(and {
-      s.system.get("p2").stage == ProposeStage,
-      s.messages.values().forall(ms => {
-        ms.contains(Propose({ src: "p2", round: 1, proposal: "v0", valid_round: 0 }))
+      .then("p1".with_cue(listen_proposal_in_prevote_commit, v0_proposal).perform(lock_value_and_precommit))
+      .then("p2".with_cue(listen_proposal_in_prevote_commit, v0_proposal).perform(lock_value_and_precommit))
+
+      .then("p2".with_cue(listen_quorum_precommits_any, ()).perform(trigger_precommit_timeout))
+
+      .then(step_with("p2", on_precommit_timeout))
+      // p2 starts a new round
+      .expect(s.system.get("p2").round == 1)
+
+      // since p2 is the proposer in the new round, it will propose the stored valid value
+      .expect(and {
+        s.system.get("p2").stage == ProposeStage,
+        s.messages.values().forall(ms => {
+          ms.contains(Propose({ src: "p2", round: 1, proposal: "v0", valid_round: 0 }))
+        })
       })
-    })
 
-    // Which enables line 28 to be called by p2, as it is in propose stage and can receive
-    // the new proposal with valid_round 0.
-    .then(step_with("p2", upon_proposal_in_propose_prevote))
+      // Which enables line 28 to be called by p2, as it is in propose stage and can receive
+      // the new proposal with valid_round 0.
+      .then("p2"
+        .with_cue(listen_proposal_in_propose_prevote, { proposal: "v0", round: 1, src: "p2", valid_round: 0 })
+        .perform(broadcast_prevote_with_validation)
+      )
+  }
 }
 
 module no_agreement {
+  // Should fail:
+  // quint run tendermint.qnt --main no_agreement --invariants=agreement validity accountability
+  //
+  // Should succeed (accountability should still hold):
+  // quint run tendermint.qnt --main no_agreement --invariant=accountability
+  // quint test tendermint.qnt --main no_agreement
+
   import tendermint(
     F = 1,
     CORRECT = Set("p1", "p2"),
@@ -688,40 +827,17 @@ module no_agreement {
     MAX_ROUND = 4
   ).*
 
-  run disagreementTest = init
-    // There are several byzantine proposals. Lose the ones we don't want to consume
-    .then("p1".lose_messages(
-      ms => ms.get_proposals().filter(p => p.proposal != "v0").map(p => Propose(p))
-    ))
-    .then("p2".lose_messages(
-      ms => ms.get_proposals().filter(p => p.proposal != "v1").map(p => Propose(p))
-    ))
-
-    // p1 reacts to the byzantine proposal for v0
-    .then(step_with("p1", upon_proposal_in_propose))
-    // p2 reacts to the byzantine proposal for v1
-    .then(step_with("p2", upon_proposal_in_propose))
-
-    // Partitioning: p1 and p2 lose each other's messages
-    .then("p1".lose_messages(ms => ms.filter(m => m.source() == "p2")))
-    .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
-
-    // p1 doesn't see the prevote from p2, but there are enough prevotes without it
-    .then(step_with("p1", upon_quorum_prevotes_any))
-    // p2 doesn't see the prevote from p1, but there are enough prevotes without it
-    .then(step_with("p2", upon_quorum_prevotes_any))
-
-    // Partitioning: p1 and p2 lose each other's messages
-    .then("p1".lose_messages(ms => ms.filter(m => m.source() == "p2")))
-    .then("p2".lose_messages(ms => ms.filter(m => m.source() == "p1")))
-
-    // p1 doesn't see the precommit from p2, but there are enough precommits without it
-    .then(step_with("p1", upon_proposal_in_prevote_commit))
-    // p2 doesn't see the precommit from p1, but there are enough precommits without it
-    .then(step_with("p2", upon_proposal_in_prevote_commit))
-
-    // Now we just take the final steps towards decision
-    .then(step_with("p1", upon_proposal_in_precommit_no_decision))
-    .then(step_with("p2", upon_proposal_in_precommit_no_decision))
-    .expect(not(agreement))
+  run disagreementTest = {
+    val v0_proposal = { proposal: "v0", round: 0, src: "p3", valid_round: -1 }
+    val v1_proposal = { proposal: "v1", round: 0, src: "p3", valid_round: -1 }
+    
+    init
+      .then("p1".with_cue(listen_proposal_in_propose, v0_proposal).perform(broadcast_prevote_for_proposal))
+      .then("p2".with_cue(listen_proposal_in_propose, v1_proposal).perform(broadcast_prevote_for_proposal))
+      .then("p1".with_cue(listen_proposal_in_prevote_commit, v0_proposal).perform(lock_value_and_precommit))
+      .then("p2".with_cue(listen_proposal_in_prevote_commit, v1_proposal).perform(lock_value_and_precommit))
+      .then("p1".with_cue(listen_proposal_in_precommit_no_decision, v0_proposal).perform(decide_on_proposal))
+      .then("p2".with_cue(listen_proposal_in_precommit_no_decision, v1_proposal).perform(decide_on_proposal))
+      .expect(not(agreement))
+  }
 }

@@ -533,8 +533,7 @@ module monadbft {
       leader_upon_timeout_quorum(context.state, context),
       all_upon_timeout_quorum(context.state, context),
       upon_timeout_event(context.state, context)
-    ).flatten().filter(tr => tr.effects.size() > 0 or tr.post_state != context.state)
-
+    ).flatten()
 
   // ------------------------------------------- Effect Application -------------------------------------------
 

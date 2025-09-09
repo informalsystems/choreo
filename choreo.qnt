@@ -41,6 +41,9 @@ module choreo {
   type Listener[p, s, m, e, ce, ext] =
     (LocalContext[p, s, m, e, ext]) => Set[Transition[p, s, m, e, ce]]
 
+  type DeterministicListener[p, s, m, e, ce, ext] =
+    (LocalContext[p, s, m, e, ext]) => Transition[p, s, m, e, ce]
+
   // Only needed for micro_step
   type Input[m, e] = Message(m) | Event(e)
 
@@ -222,6 +225,17 @@ module choreo {
     process_transitions(v, transitions, apply_custom_effect)
   }
 
+  action step_deterministic(
+    v: p,
+    listener: DeterministicListener[p, s, m, e, l, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
+    local_to_global_extensions: ExtensionsConverter[p, extensions, local_extensions],
+  ): bool = {
+    val input = convert_context(s, v, local_to_global_extensions)
+    val transitions = Set(listener(input)).filter(t => t.effects.size() > 0 or t.post_state != input.state)
+    process_transitions(v, transitions, apply_custom_effect)
+  }
+
   action step_with_filter(
     v: p,
     listener: Listener[p, s, m, e, l, extensions],
@@ -252,6 +266,43 @@ module choreo {
     val new_msgs = msgs.exclude(f(msgs))
     all {
       s' = { ...s, messages: s.messages.set(v, new_msgs) }
+    }
+  }
+
+  pure def cue(
+    ctx: LocalContext[p, s, m, e, ext],
+    listen_fn: (LocalContext[p, s, m, e, ext]) => Set[r],
+    upon_fn: (LocalContext[p, s, m, e, ext], r) => Transition[p, s, m, e, ce]
+  ): Set[Transition[p, s, m, e, ce]] = {
+    val params = listen_fn(ctx)
+    params.map(param => upon_fn(ctx, param))
+  }
+
+  type CueResult[p, s, m, e, ext, r] = CueOk({ ctx: LocalContext[p, s, m, e, ext], params: r }) | NoCue
+
+  def with_cue(
+    process: p,
+    listen_fn: (LocalContext[p, s, m, e, ext]) => Set[r],
+    params: r,
+    local_to_global_extensions: ExtensionsConverter[p, ext, local_ext]
+  ): CueResult[p, s, m, e, ext, r] = {
+    val ctx = convert_context(s, process, local_to_global_extensions)
+    val valid_params = listen_fn(ctx)
+    val is_valid = valid_params.contains(params)
+    if (is_valid)
+      CueOk({ ctx: ctx, params: params })
+    else
+      NoCue
+  }
+
+  action perform(
+    cue_result: CueResult[p, s, m, e, ext, r],
+    upon_fn: (LocalContext[p, s, m, e, ext], r) => Transition[p, s, m, e, ce],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, ext],
+  ): bool = {
+    match cue_result {
+      | CueOk(cue) => process_transitions(cue.ctx.state.process_id, Set(upon_fn(cue.ctx, cue.params)), apply_custom_effect)
+      | NoCue => all { false, s' = s }
     }
   }
 }
