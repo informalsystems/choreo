@@ -8,6 +8,10 @@
 
 </div>
 
-# Choreo: choreograph distributed protocols in Quint.
+<div align="center">
+
+# Choreograph distributed protocols on Quint
+
+</div>
 
 Distributed protocols share a skeleton: actors with local state, message channels, and a scheduler/fault model. Choreo captures that skeleton in Quint. You import a few abstractions, declare messages/state, implement steps, and immediately get runnable traces.
