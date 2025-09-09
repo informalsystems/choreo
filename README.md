@@ -8,9 +8,11 @@
 
 </div>
 
+<br>
+
 <div align="center">
 
-# Choreograph distributed protocols on Quint
+# Choreograph Distributed Protocols
 
 </div>
 
