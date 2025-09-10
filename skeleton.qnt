@@ -6,6 +6,28 @@
  * distributed protocols using the Choreo framework.
  *
  * Replace the TODO comments with your protocol-specific implementation.
+ *
+ * This skeleton demonstrates the choreo::cue pattern for message-based transitions.
+ * This is not mandatory, you can simply right any function that returns `Transition`
+ * or `Set[Transition]` and use it in the `main_listener`. However, we recommend this
+ * pattern as it makes it easier to right runs (example scenarios).
+ *
+ * The pattern separates concerns into two functions:
+ *
+ * 1. Listener Function: Checks conditions and extracts parameters from messages
+ *    - Takes LocalContext and returns Set[T] where T is the parameter type
+ *    - Applies state guards and message filters
+ *    - Returns parameters that will be passed to the action function
+ *
+ * 2. Action Function: Performs the actual state transition
+ *    - Takes LocalContext and parameter T, returns single Transition
+ *    - Defines effects and new state based on the parameter
+ *
+ * Usage in main_listener:
+ *   choreo::cue(ctx, listener_function, action_function)
+ *
+ * Example from tendermint.qnt:
+ *   choreo::cue(ctx, listen_proposal_in_propose, broadcast_prevote_for_proposal)
  */
 
 module my_protocol {
@@ -105,7 +127,61 @@ module my_protocol {
   // TRANSITION FUNCTIONS
   // =============================================================================
 
-  // TODO: Implement your transition functions
+  // TODO: Implement your listener functions and action functions
+  // Listener functions should:
+  // 1. Check if conditions are met (guard condition)
+  // 2. Return Set() if not applicable
+  // 3. Return Set(params) if applicable, where params will be passed to the action function
+
+  // Example listener function - checks for messages and conditions
+  pure def listen_for_example_message(ctx: LocalContext): Set[Node] = {
+    val s = ctx.state
+    val messages = ctx.messages
+
+    // State guard - when is this listener applicable?
+    val state_guard = true  // TODO: Replace with actual condition
+
+    // Message filter - extract relevant messages
+    val example_messages = messages.filterMap(m => match m {
+      | ExampleMessage(node) => Some(node)
+      | _ => None
+    })
+
+    // Message guard - which messages satisfy conditions?
+    def message_guard = (node) => true  // TODO: Add message conditions
+
+    // Apply guards and return parameters for action
+    if (state_guard) {
+      example_messages.filter(node => message_guard(node))
+    } else {
+      Set()
+    }
+  }
+
+  // Example action function - performs the actual transition
+  pure def handle_example_message(ctx: LocalContext, node: Node): Transition = {
+    val s = ctx.state
+
+    // TODO: Define what effects this transition produces
+    {
+      effects: Set(
+        // Examples of effects:
+        // choreo::Broadcast(ExampleMessage(ctx.state.process_id)),
+        // choreo::Send({ to: "specific_node", message: ExampleMessage(ctx.state.process_id) }),
+        // choreo::TriggerEvent(TimeoutEvent(ctx.state.round)),
+        // choreo::CustomEffect(LogEvidence(msg))
+      ),
+      // TODO: Define the new state after this transition
+      post_state: {
+        ...s
+        // Update specific fields:
+        // phase: NewPhase,
+        // round: s.round + 1
+      }
+    }
+  }
+
+  // TODO: Implement traditional transition functions if needed (when there are no parameters)
   // Each transition function should:
   // 1. Check if the transition is applicable (guard condition)
   // 2. Return Set() if not applicable
@@ -136,14 +212,6 @@ module my_protocol {
     }
   }
 
-  // TODO: Add more transition functions for your protocol
-  // Examples:
-
-  // pure def handle_vote_message(ctx: LocalContext): Set[Transition] = {
-  //   // TODO: Implement vote handling
-  //   Set()
-  // }
-
   // pure def handle_timeout(ctx: LocalContext): Set[Transition] = {
   //   // TODO: Implement timeout handling
   //   Set()
@@ -154,16 +222,26 @@ module my_protocol {
   //   Set()
   // }
 
+  // TODO: Add more listener/action function pairs for your protocol
+
   // =============================================================================
   // MAIN LISTENER
   // =============================================================================
 
   // TODO: Combine all your transition functions in the main listener
+  // Use choreo::cue for message-based transitions (listener + action pattern)
+  // Or use direct calls for anything returning transitions
   pure def main_listener(ctx: LocalContext): Set[Transition] = {
     Set(
-      example_transition(ctx)
-      // TODO: Add all your transition functions here:
-      // handle_vote_message(ctx),
+      // choreo::cue pattern: choreo::cue(context, listener_function, action_function)
+      choreo::cue(ctx, listen_for_example_message, handle_example_message),
+
+      // TODO: Add more choreo::cue calls for message-based transitions:
+      // choreo::cue(ctx, listen_for_vote_message, handle_vote_message),
+      // choreo::cue(ctx, listen_for_proposal, handle_proposal),
+
+      // TODO: Add direct calls simpler transitions that don't take parameters:
+      example_transition(ctx),
       // handle_timeout(ctx),
       // spontaneous_action(ctx)
     ).flatten()
@@ -281,14 +359,21 @@ module my_protocol {
   // WIRING
   // =============================================================================
 
-  // TODO: Add any additional utility functions specific to your protocol
-
   // Access global state
   val s = choreo::s
 
-  // "Instantiate" the `step_with` operator with the extra types
-  action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
-    choreo::step_with(v, listener, apply_custom_effect, (e, p) => e)
+  // These are useful when writing tests and working with the cue pattern
+  // We create instances of these operators with fewer parameters, since `apply_custom_effect`
+  // and `global_to_local_extensions` can be fixed.
+  // (you don't need to change these)
+  action step_deterministic(v: Node, listener: LocalContext => Transition): bool =
+    choreo::step_deterministic(v, listener, apply_custom_effect, (e, p) => e)
+
+  def with_cue(process, listen_fn, params) =
+    choreo::with_cue(process, listen_fn, params, (e, p) => e)
+
+  action perform(cue_ctx, upon_fn) =
+    choreo::perform(cue_ctx, upon_fn, apply_custom_effect)
 
   // TODO do the same for other step_ operators you want to use.
   // You can also create aliases for your convenience, like:
