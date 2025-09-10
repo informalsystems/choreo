@@ -277,13 +277,14 @@ module my_protocol {
 
   // TODO: Define your process set
   pure val NODES = Set("n1", "n2", "n3")  // Replace with your node set
+  // Use `const` if you want to parameterize the model
+  // const NODES: Set[Node]
 
   // TODO: Add any protocol-specific constants
   // Examples:
-  // pure val COORDINATOR = "coordinator"
-  // pure val PARTICIPANTS = Set("p1", "p2", "p3")
-  // pure val INITIAL_VALUE = "default"
-  // pure val TIMEOUT_DURATION = 10
+  // pure val INITIAL_VALUE = "v0"
+  // pure val VALID_VALUES = Set("v0", "v1", "v2")
+  // pure val INITIAL_MESSAGE = ExampleMessage("n1")
 
   // =============================================================================
   // INITIALIZATION
@@ -382,7 +383,7 @@ module my_protocol {
  }
 
 // =============================================================================
-// INSTANCE MODULE (Optional)
+// INSTANCE MODULE (Optional - only if you want to parameterize your model)
 // =============================================================================
 
 // TODO: Create specific instances of your protocol for testing
