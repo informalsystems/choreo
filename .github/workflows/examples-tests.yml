@@ -1,0 +1,31 @@
+name: Choreo Examples Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test-examples:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Install Quint
+      run: |
+        npm install -g @informalsystems/quint
+        quint --version
+
+    - name: Install txm (test runner)
+      run: npm install -g txm
+
+    - name: Run tests with txm
+      run: txm examples-tests.md
