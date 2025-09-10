@@ -25,9 +25,9 @@ When specifying distributed protocols in Quint, the same problems appear:
 - How to distinguish local state from global environment?
 - How to represent timeouts?
 
-Experience and research have lead us to some answers:
-- The [message soup technique]() is the most efficient way of modeling exchange of messages
-- Functions with proper interface help isolate local state manipulation and effects on the global enviorment without mixing them up and acidentaly reading from global state.
+Experience and research have led us to some answers:
+- The [message soup technique](https://quint-lang.org/posts/soup) is the most efficient way of modeling exchange of messages
+- Functions with proper interface help isolate local state manipulation and effects on the global environment without mixing them up and accidentally reading from global state.
 - Timeouts are simply internal events that can be consumed at any point in the future
 
 We learned this and this helps us write good specs. Choreo hands these techniques to you with a structured way to write specs.
@@ -38,13 +38,13 @@ Compare a [traditional Tendermint specification](https://github.com/informalsyst
 
 Choreo provides ready-made abstractions that protocol designers can import and use immediately:
 
-```quint
+```bluespec
 import choreo(processes = NODES) as choreo from "./choreo"
 ```
 
 ### Built-in Message Handling
 Instead of manually managing message routing and filtering, define listeners that automatically trigger on relevant messages:
-```quint
+```bluespec
 pure def listen_proposal_in_propose(ctx: LocalContext): Set[ProposeMsg] = {
   // Filter for relevant proposals
 }
@@ -64,7 +64,7 @@ pure def main_listener(ctx: LocalContext): Set[Transition] = {
 ### Structured State Transitions
 
 This is what a `Transition` looks like:
-```quint
+```bluespec
 {
   post_state: { ...s, stage: PreVoteStage },
   effects: Set(choreo::Broadcast(PreVote(message)))
