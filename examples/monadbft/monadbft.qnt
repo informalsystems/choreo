@@ -618,7 +618,6 @@ module monadbft {
   action step = choreo::step_with_displayer(
     main_listener,
     apply_custom_effect,
-    (e, p) => e,
     displayer
   )
 

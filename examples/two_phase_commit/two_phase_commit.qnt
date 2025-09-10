@@ -150,8 +150,7 @@ module two_phase_commit {
 
   action step = choreo::step(
     main_listener,
-    (c, _) => c,
-    (e, p) => e, // env to local context,
+    (c, _) => c
   )
 
   // Invariants and witnesses
@@ -166,7 +165,7 @@ module two_phase_commit {
   val wit_commit = PARTICIPANTS.exists(p => choreo::s.system.get(p).stage != Committed)
 
   action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
-    choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
+    choreo::step_with(v, listener, (c, _) => c)
 
   run commitTest = init
     .then(step_with("p1", spontaneously_prepares))

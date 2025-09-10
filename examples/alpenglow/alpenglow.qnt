@@ -604,8 +604,7 @@ module alpenglow {
 
   action step = choreo::step(
     main_listener,
-    (c, _) => c,
-    (e, p) => e
+    (c, _) => c
   )
 
   // -----------------------------------------------------------------------------
@@ -668,7 +667,7 @@ module alpenglow {
   // -----------------------------------------------------------------------------
 
   action step_with(v: ProcessID, listener: LocalContext => Set[Transition]): bool =
-    choreo::step_with(v, listener, (c, _) => c, (e, p) => e)
+    choreo::step_with(v, listener, (c, _) => c)
 
   action receiveSpecificBlock(v: ProcessID, b: Block): bool = all {
     allBlocks.contains(b),

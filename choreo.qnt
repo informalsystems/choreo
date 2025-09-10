@@ -54,8 +54,6 @@ module choreo {
   type EffectProcessor[p, s, m, e, ce, ext] =
     (GlobalContext[p, s, m, e, ext], ce) => GlobalContext[p, s, m, e, ext]
 
-  type ExtensionsConverter[p, l, g] =
-    (g, p) => l
 
   type Effect[p, m, e, ce] =
     | Broadcast(m)
@@ -111,14 +109,13 @@ module choreo {
 
   pure def convert_context(
     env: GlobalContext[p, s, m, e, ext],
-    v: p,
-    global_to_local_extensions: ExtensionsConverter[p, ext, local_ext]
-  ): LocalContext[p, s, m, e, local_ext] = {
+    v: p
+  ): LocalContext[p, s, m, e, ext] = {
     {
       state: env.system.get(v),
       messages: env.messages.get(v),
       events: env.events.get(v),
-      extensions: global_to_local_extensions(env.extensions, v)
+      extensions: env.extensions
     }
   }
 
@@ -174,35 +171,32 @@ module choreo {
   }
 
   action step(
-    listener: Listener[p, s, m, e, l, extensions],
-    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
-    global_to_local_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    listener: Listener[p, s, m, e, ce, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions]
   ): bool = {
     nondet v = oneOf(processes)
-    val input = convert_context(s, v, global_to_local_extensions)
+    val input = convert_context(s, v)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     process_transitions(v, transitions, apply_custom_effect)
   }
 
   action step_with_displayer(
-    listener: Listener[p, s, m, e, l, extensions],
+    listener: Listener[p, s, m, e, ce, extensions],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
-    global_to_local_extensions: ExtensionsConverter[p, extensions, local_extensions],
-    displayer: Displayer[p, s, m, e, extensions, d],
+    displayer: Displayer[p, s, m, e, extensions, d]
   ): bool = {
     nondet v = oneOf(processes)
-    val input = convert_context(s, v, global_to_local_extensions)
+    val input = convert_context(s, v)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     process_transitions_with_displayer(v, transitions, apply_custom_effect, displayer)
   }
 
   action micro_step(
     listener: MicroListener[p, s, m, e, ce, extensions],
-    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
-    global_to_local_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions]
   ): bool = {
     nondet process = processes.oneOf()
-    val ctx = convert_context(s, process, global_to_local_extensions)
+    val ctx = convert_context(s, process)
     any {
       nondet msg = s.messages.get(process).oneOf()
       val transitions = listener(ctx, Message(msg))
@@ -216,46 +210,42 @@ module choreo {
 
   action step_with(
     v: p,
-    listener: Listener[p, s, m, e, l, extensions],
-    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
-    global_to_local_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    listener: Listener[p, s, m, e, ce, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions]
   ): bool = {
-    val input = convert_context(s, v, global_to_local_extensions)
+    val input = convert_context(s, v)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     process_transitions(v, transitions, apply_custom_effect)
   }
 
   action step_deterministic(
     v: p,
-    listener: DeterministicListener[p, s, m, e, l, extensions],
-    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
-    global_to_local_extensions: ExtensionsConverter[p, extensions, local_extensions],
+    listener: DeterministicListener[p, s, m, e, ce, extensions],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions]
   ): bool = {
-    val input = convert_context(s, v, global_to_local_extensions)
+    val input = convert_context(s, v)
     val transitions = Set(listener(input)).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     process_transitions(v, transitions, apply_custom_effect)
   }
 
   action step_with_filter(
     v: p,
-    listener: Listener[p, s, m, e, l, extensions],
+    listener: Listener[p, s, m, e, ce, extensions],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
-    global_to_local_extensions: ExtensionsConverter[p, extensions, local_extensions],
-    f: (Transition[p, s, m, e, ce]) => bool,
+    f: (Transition[p, s, m, e, ce]) => bool
   ): bool = {
-    val input = convert_context(s, v, global_to_local_extensions)
+    val input = convert_context(s, v)
     val transitions = listener(input).filter(t => t.effects.size() > 0 or t.post_state != input.state).filter(f)
     process_transitions(v, transitions, apply_custom_effect)
   }
 
   action step_with_messages(
     v: p,
-    listener: Listener[p, s, m, e, l, extensions],
+    listener: Listener[p, s, m, e, ce, extensions],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
-    global_to_local_extensions: ExtensionsConverter[p, extensions, local_extensions],
-    f: Set[m] => Set[m],
+    f: Set[m] => Set[m]
   ): bool = {
-    val input = convert_context(s, v, global_to_local_extensions)
+    val input = convert_context(s, v)
     val input1 = { ...input, messages: f(input.messages) }
     val transitions = listener(input1).filter(t => t.effects.size() > 0 or t.post_state != input.state)
     process_transitions(v, transitions, apply_custom_effect)
@@ -283,10 +273,9 @@ module choreo {
   def with_cue(
     process: p,
     listen_fn: (LocalContext[p, s, m, e, ext]) => Set[r],
-    params: r,
-    global_to_local_extensions: ExtensionsConverter[p, ext, local_ext]
+    params: r
   ): CueResult[p, s, m, e, ext, r] = {
-    val ctx = convert_context(s, process, global_to_local_extensions)
+    val ctx = convert_context(s, process)
     val valid_params = listen_fn(ctx)
     val is_valid = valid_params.contains(params)
     if (is_valid)

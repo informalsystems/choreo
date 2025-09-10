@@ -315,8 +315,7 @@ module my_protocol {
   // TODO: Define how the system makes progress
   action step = choreo::step(
     main_listener,
-    apply_custom_effect,  // Use (c, _) => c if no custom effects
-    (e, p) => e          // Use your extensions converter if needed
+    apply_custom_effect  // Use (c, _) => c if no custom effects
   )
 
   // =============================================================================
@@ -364,13 +363,15 @@ module my_protocol {
 
   // These are useful when writing tests and working with the cue pattern
   // We create instances of these operators with fewer parameters, since `apply_custom_effect`
-  // and `global_to_local_extensions` can be fixed.
-  // (you don't need to change these)
+  // can be fixed. (you don't need to change these)
+  action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
+    choreo::step_with(v, listener, apply_custom_effect)
+
   action step_deterministic(v: Node, listener: LocalContext => Transition): bool =
-    choreo::step_deterministic(v, listener, apply_custom_effect, (e, p) => e)
+    choreo::step_deterministic(v, listener, apply_custom_effect)
 
   def with_cue(process, listen_fn, params) =
-    choreo::with_cue(process, listen_fn, params, (e, p) => e)
+    choreo::with_cue(process, listen_fn, params)
 
   action perform(cue_ctx, upon_fn) =
     choreo::perform(cue_ctx, upon_fn, apply_custom_effect)
