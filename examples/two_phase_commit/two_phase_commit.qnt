@@ -46,84 +46,82 @@ module two_phase_commit {
 
   // --- Participant transitions ----------------------------------------------
   pure def spontaneously_prepares(ctx: LocalContext): Set[Transition] = {
-    if (not(ctx.state.role == Participant and ctx.state.stage == Working)) {
-      Set()
-    } else {
+    if (ctx.state.role == Participant and ctx.state.stage == Working) {
       Set({
         effects: Set(choreo::Broadcast(ParticipantPrepared(ctx.state.process_id))),
         post_state: { ...ctx.state, stage: Prepared }
       })
+    } else {
+      Set()
     }
   }
 
   pure def spontaneously_aborts(ctx: LocalContext): Set[Transition] = {
-    if (not(ctx.state.role == Participant and ctx.state.stage == Working)) {
-      Set()
-    } else {
+    if (ctx.state.role == Participant and ctx.state.stage == Working) {
       Set({
         effects: Set(),
         post_state: { ...ctx.state, stage: Aborted }
       })
+    } else {
+      Set()
     }
   }
 
   pure def aborts_as_instructed(ctx: LocalContext): Set[Transition] = {
-    if (not(ctx.state.role == Participant and ctx.messages.contains(CoordinatorAbort))) {
-      Set()
-    } else {
+    if (ctx.state.role == Participant and ctx.messages.contains(CoordinatorAbort)) {
       Set({
         effects: Set(),
         post_state: { ...ctx.state, stage: Aborted }
       })
+    } else {
+      Set()
     }
   }
 
   pure def commits_as_instructed(ctx: LocalContext): Set[Transition] = {
-    if (not(ctx.state.role == Participant and ctx.messages.contains(CoordinatorCommit))) {
-      Set()
-    } else {
+    if (ctx.state.role == Participant and ctx.messages.contains(CoordinatorCommit)) {
       Set({
         effects: Set(),
         post_state: { ...ctx.state, stage: Committed }
       })
+    } else {
+      Set()
     }
   }
 
   // --- Coordinator transitions ------------------------------
   pure def decides_on_commit(ctx: LocalContext): Set[Transition] = {
-    if (not(
-      ctx.state.role == Coordinator
+    if (ctx.state.role == Coordinator
         and ctx.state.stage == Working
-        and ctx.messages.get_prepared_msgs().size() == PARTICIPANTS.size()
-    )) {
-      Set()
-    } else {
+        and ctx.messages.get_prepared_msgs().size() == PARTICIPANTS.size()) {
       Set({
         effects: Set(choreo::Broadcast(CoordinatorCommit)),
         post_state: { ...ctx.state, stage: Committed }
       })
+    } else {
+      Set()
     }
   }
 
   pure def decides_on_abort(ctx: LocalContext): Set[Transition] = {
-    if (not(ctx.state.role == Coordinator and ctx.state.stage == Working)) {
-      Set()
-    } else {
+    if (ctx.state.role == Coordinator and ctx.state.stage == Working) {
       Set({
         effects: Set(choreo::Broadcast(CoordinatorAbort)),
         post_state: { ...ctx.state, stage: Aborted }
       })
+    } else {
+      Set()
     }
   }
 
-  pure def main_listener(input: LocalContext): Set[Transition] = {
+  pure def main_listener(ctx: LocalContext): Set[Transition] = {
     Set(
-      spontaneously_prepares(input),
-      spontaneously_aborts(input),
-      aborts_as_instructed(input),
-      commits_as_instructed(input),
-      decides_on_commit(input),
-      decides_on_abort(input)
+      spontaneously_prepares(ctx),
+      spontaneously_aborts(ctx),
+      aborts_as_instructed(ctx),
+      commits_as_instructed(ctx),
+      decides_on_commit(ctx),
+      decides_on_abort(ctx)
     ).flatten()
   }
 

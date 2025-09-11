@@ -1,13 +1,13 @@
 // -*- mode: Bluespec; -*-
 /**
- * Choreo Protocol Skeleton
+ * Choreo Protocol Template
  *
  * This is a template file to help you get started with implementing
  * distributed protocols using the Choreo framework.
  *
  * Replace the TODO comments with your protocol-specific implementation.
  *
- * This skeleton demonstrates the choreo::cue pattern for message-based transitions.
+ * This template also demonstrates the choreo::cue pattern for message-based transitions.
  * This is not mandatory, you can simply right any function that returns `Transition`
  * or `Set[Transition]` and use it in the `main_listener`. However, we recommend this
  * pattern as it makes it easier to right runs (example scenarios).
