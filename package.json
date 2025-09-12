@@ -1,0 +1,16 @@
+{
+  "name": "choreo-examples-tests",
+  "version": "1.0.0",
+  "description": "Test suite for choreo protocol examples",
+  "scripts": {
+    "test": "txm examples-tests.md",
+    "test:verbose": "txm examples-tests.md --verbose",
+    "install:txm": "npm install -g txm",
+    "pretest": "which txm || (echo 'Installing txm...' && npm run install:txm)"
+  },
+  "devDependencies": {
+    "txm": "^9.2.0"
+  },
+  "keywords": ["choreo", "quint", "distributed-protocols", "testing"],
+  "license": "Apache-2.0"
+}
