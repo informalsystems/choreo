@@ -586,8 +586,7 @@ module tendermint {
 
   action step = choreo::step(
     main_listener,
-    apply_custom_effect,
-    (e, p) => e, // env to local context
+    apply_custom_effect
   )
 
 
@@ -731,13 +730,13 @@ module tendermint {
   pure val VALID_VALUES = Set("v0", "v1", "v2")
 
   action step_with(v: Node, listener: LocalContext => Set[Transition]): bool =
-    choreo::step_with(v, listener, apply_custom_effect, (e, p) => e)
+    choreo::step_with(v, listener, apply_custom_effect)
 
   action step_deterministic(v: Node, listener: LocalContext => Transition): bool =
-    choreo::step_deterministic(v, listener, apply_custom_effect, (e, p) => e)
+    choreo::step_deterministic(v, listener, apply_custom_effect)
 
   def with_cue(process, listen_fn, params) =
-    choreo::with_cue(process, listen_fn, params, (e, p) => e)
+    choreo::with_cue(process, listen_fn, params)
 
   action perform(cue_ctx, upon_fn) =
     choreo::perform(cue_ctx, upon_fn, apply_custom_effect)
@@ -747,14 +746,14 @@ module tendermint {
     listener: LocalContext => Set[Transition],
     f: Transition => bool
   ): bool =
-    choreo::step_with_filter(v, listener, apply_custom_effect, (e, p) => e, f)
+    choreo::step_with_filter(v, listener, apply_custom_effect, f)
 
   action step_with_messages(
     v: Node,
     listener: LocalContext => Set[Transition],
     f: Set[Message] => Set[Message]
   ): bool =
-    choreo::step_with_messages(v, listener, apply_custom_effect, (e, p) => e, f)
+    choreo::step_with_messages(v, listener, apply_custom_effect, f)
 
   action lose_messages = choreo::lose_messages
 
