@@ -705,8 +705,9 @@ module some_byz {
 }
 
 module some_byz_vp {
+  // This module sets different voting powers
   // For a trace where a value is fast finalized call
-  // quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness
+  // quint run alpenglow.qnt --main some_byz_vp --invariant fastFinalizedWitness
   import alpenglow(
     correct = Set("v1", "v2"),
     good = Set(),
