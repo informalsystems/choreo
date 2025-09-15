@@ -408,9 +408,9 @@ module alpenglow {
     val blocksWithNotarVotes =
       allMessages
         .filter(m => slotOf(m.msg) == now)
-        .fold(Set(), (s, m) => match m.msg {
-          | NotarVoteMsg(n) => s.setAdd(n)
-          | _ => s
+        .filterMap(m => match m.msg {
+          | NotarVoteMsg(n) => Some(n)
+          | _ => None
         })
 
     // Σ_b notar(b)
@@ -664,19 +664,11 @@ module alpenglow {
   // Setup for runs
   // -----------------------------------------------------------------------------
 
-  action step_with(v: ProcessID, listener: LocalContext => Set[Transition]): bool =
-    choreo::step_with(v, listener, (c, _) => c)
-
   def with_cue(process, listen_fn, params) =
     choreo::with_cue(process, listen_fn, params)
 
   action perform(cue_ctx, upon_fn) =
     choreo::perform(cue_ctx, upon_fn, (c, _) => c)
-
-  action receiveSpecificBlock(v: ProcessID, b: Block): bool = all {
-    allBlocks.contains(b),
-    step_with(v, (ctx) => Set(process_block_input(ctx, b)))
-  }
 }
 
 module some_byz {
