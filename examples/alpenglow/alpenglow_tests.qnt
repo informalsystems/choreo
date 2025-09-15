@@ -1,8 +1,8 @@
 // -*- mode: Bluespec; -*-
 
 module alpenglow_tests {
-  // For a trace where a value is fast finalized call
   // quint test alpenglow_tests.qnt
+
   import alpenglow(
     correct = Set("v1", "v2", "v3", "v4", "v5"),
     good = Set(),
