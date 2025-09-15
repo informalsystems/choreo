@@ -75,4 +75,18 @@ module alpenglow_tests {
         // Expect SkipFallbackVoteMsg was broadcasted (indicates broadcast_fallback_skip_vote was executed)
         allMessages.contains({ sender: "v1", msg: SkipFallbackVoteMsg(0) })
       )
+
+  run parentReadyTest =
+    init
+      .then("v1".with_cue(listen_timeouts, 0).perform(skip_window_if_voted))
+      .then("v3".with_cue(listen_timeouts, 0).perform(skip_window_if_voted))
+      .then("v5".with_cue(listen_timeouts, 0).perform(skip_window_if_voted))
+      .then("v2".with_cue(listen_block_inputs, { hash: 42, parent: -1, slot: 0 }).perform(process_block_input))
+      .then("v4".with_cue(listen_block_inputs, { hash: 42, parent: -1, slot: 0 }).perform(process_block_input))
+      .then("v5".with_cue(listen_safe_to_notar, { slot: 0, hash: 42 }).perform(broadcast_fallback_notar_vote))
+      .then("v1".with_cue(listen_parent_ready, { slot: 0, hash: 42 }).perform(check_pending_and_start_timeout))
+      .expect(
+        // Expect ParentReady object added to v1's state (indicates check_pending_and_start_timeout was executed)
+        s.system.get("v1").state[0].contains(ParentReady(42))
+      )
 }
