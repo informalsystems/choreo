@@ -194,7 +194,7 @@ module alpenglow {
 
   /// line 10 of TryNotar. TODO: Is there more to it?
   pure def firstSlotInLeaderWindow(slot: Slot): bool =
-    slot % 4 == 0 // TODO implement
+    slot % 2 == 0 // TODO implement
 
   // Definition 13 (certificates)
   // They are defined over a set of messages. Currently we evaluate this over the
