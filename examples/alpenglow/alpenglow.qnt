@@ -444,10 +444,9 @@ module alpenglow {
   // Listeners (Algorithm 1)
   // -----------------------------------------------------------------------------
 
-  /// Listen for block input - returns parameters for upon_block_input
+  /// Listen for block input - returns parameters for process_block_input
   pure def listen_block_inputs(ctx: LocalContext): Set[Block] = {
-    val availableBlocks = allBlocks.filter(b => aliveSlots.contains(b.slot))
-    availableBlocks
+    allBlocks.filter(b => aliveSlots.contains(b.slot))
   }
 
   pure def process_block_input(ctx: LocalContext, b: Block): Transition = {
@@ -464,7 +463,7 @@ module alpenglow {
       tn.result
   }
 
-  /// Listen for timeout events - returns parameters for upon_timeout
+  /// Listen for timeout events - returns parameters for skip_window_if_voted
   pure def listen_timeouts(ctx: LocalContext): Set[Slot] = {
     val activeTimeouts = ctx.events
     aliveSlots.filter(slot => activeTimeouts.contains(slot))
@@ -480,7 +479,7 @@ module alpenglow {
       { effects: Set(), post_state: ls }
   }
 
-  /// Listen for block notarized events - returns parameters for upon_block_notarized
+  /// Listen for block notarized events - returns parameters for try_finalize_block
   pure def listen_block_notarized(ctx: LocalContext): Set[{ slot: Slot, hash: Blockhash }] = {
     val notarizedBlocks = allBlocks.filter(b =>
       isCertified(NotarizationCertificate({ slot: b.slot, hash: b.hash }), ctx.messages) and
@@ -495,7 +494,7 @@ module alpenglow {
     tryFinal(s1, params.slot, params.hash)
   }
 
-  /// Listen for parent ready events - returns parameters for upon_parent_ready
+  /// Listen for parent ready events - returns parameters for check_pending_and_start_timeout
   pure def listen_parent_ready(ctx: LocalContext): Set[{ slot: Slot, hash: Blockhash }] = {
     val readyBlocks = aliveSlots.map(s =>
       parentReadyBlocks(s, ctx.messages)
@@ -513,7 +512,7 @@ module alpenglow {
     { effects: r1.effects.union(r2.effects), post_state: r2.post_state }
   }
 
-  /// Listen for safe to notar events - returns parameters for upon_safe_to_notar
+  /// Listen for safe to notar events - returns parameters for broadcast_fallback_notar_vote
   pure def listen_safe_to_notar(ctx: LocalContext): Set[{ slot: Slot, hash: Blockhash }] = {
     val safeBlocks = allBlocks.filter(b =>
       aliveSlots.contains(b.slot) and
@@ -538,7 +537,7 @@ module alpenglow {
       s1
   }
 
-  /// Listen for safe to skip events - returns parameters for upon_safe_to_skip
+  /// Listen for safe to skip events - returns parameters for broadcast_fallback_skip_vote
   pure def listen_safe_to_skip(ctx: LocalContext): Set[Slot] =
     aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, ctx.messages, slot))
 
