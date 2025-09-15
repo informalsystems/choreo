@@ -346,14 +346,14 @@ module alpenglow {
       }
     )
 
-  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[Message]): bool = all {
-    firstSlotInLeaderWindow(slot),
-    0.to(slot - 1).exists(s =>
-      val b = { slot: s, hash: hash }
+  pure def parentReadyBlocks(slot: Slot, msgs: Set[Message]): Set[Block] = {
+    if (not(firstSlotInLeaderWindow(slot))) Set() else
+    allBlocks.filter(b =>
       and {
+        b.slot < slot,
         or {
-          isCertified(NotarizationCertificate(b), msgs),
-          isCertified(NotarFallbackCertificate(b), msgs)
+          isCertified(NotarizationCertificate(b.reference()), msgs),
+          isCertified(NotarFallbackCertificate(b.reference()), msgs)
         },
         b.slot.to(slot).subseteq(slotsSkipCertified(msgs))
       }
@@ -497,12 +497,11 @@ module alpenglow {
 
   /// Listen for parent ready events - returns parameters for upon_parent_ready
   pure def listen_parent_ready(ctx: LocalContext): Set[{ slot: Slot, hash: Blockhash }] = {
-    val readyBlocks = allBlocks.filter(b =>
-      aliveSlots.contains(b.slot) and
-      parentReadyCondition(b.slot, b.hash, ctx.messages)
-    )
+    val readyBlocks = aliveSlots.map(s =>
+      parentReadyBlocks(s, ctx.messages)
+    ).flatten()
 
-    readyBlocks.map(block => { slot: block.slot, hash: block.hash })
+    readyBlocks.map(block => block.reference())
   }
 
   pure def check_pending_and_start_timeout(ctx: LocalContext, params: { slot: Slot, hash: Blockhash }): Transition = {
