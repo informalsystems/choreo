@@ -18,6 +18,8 @@
 
 Choreo provides a structured foundation for writing distributed protocol specifications in [Quint](https://github.com/informalsystems/quint). Instead of starting with a blank file, you get a paved path with pre-built abstractions for message passing, state management, and common distributed systems patterns, all implementing the best techniques for modeling this type of system.
 
+Check out the [documentation](https://quint-lang.org/choreo).
+
 ## Why use Choreo
 
 When specifying distributed protocols in Quint, the same problems appear:
