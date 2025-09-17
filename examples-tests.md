@@ -47,11 +47,32 @@ bash -
 
 ## Alpenglow Examples
 
+### OK on alpenglow some_byz module - run with agreement
+
+<!-- !test check alpenglow some_byz - run with agreement -->
+    cd examples/alpenglow && quint run alpenglow.qnt --main some_byz --invariant agreement --max-samples 20 --verbosity 1
+
+### OK on alpenglow tests
+
+<!-- !test check alpenglow tests -->
+    cd examples/alpenglow && quint test alpenglow_tests.qnt --verbosity 1
+
+### OK on alpenglow disagreement test
+
+<!-- !test check alpenglow disagreement test -->
+    cd examples/alpenglow && quint test alpenglow.qnt --main too_many_byz --verbosity 1
+
 ### FAIL on alpenglow some_byz module - run with fastFinalizedWitness
 
 <!-- !test exit 1 -->
 <!-- !test check alpenglow some_byz - run with fastFinalizedWitness -->
     cd examples/alpenglow && quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness --verbosity 1
+
+### FAIL on alpenglow some_byz_vp module - run with fastFinalizedWitness
+
+<!-- !test exit 1 -->
+<!-- !test check alpenglow some_byz_vp - run with fastFinalizedWitness -->
+    cd examples/alpenglow && quint run alpenglow.qnt --main some_byz_vp --invariant fastFinalizedWitness --verbosity 1
 
 ### FAIL on alpenglow too_many_byz_1 module - run with agreement (should find counterexample)
 

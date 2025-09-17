@@ -194,7 +194,7 @@ module alpenglow {
 
   /// line 10 of TryNotar. TODO: Is there more to it?
   pure def firstSlotInLeaderWindow(slot: Slot): bool =
-    slot % 4 == 0 // TODO implement
+    slot % 2 == 0 // TODO implement
 
   // Definition 13 (certificates)
   // They are defined over a set of messages. Currently we evaluate this over the
@@ -346,14 +346,14 @@ module alpenglow {
       }
     )
 
-  pure def parentReadyCondition(slot: Slot, hash: Blockhash, msgs: Set[Message]): bool = all {
-    firstSlotInLeaderWindow(slot),
-    0.to(slot - 1).exists(s =>
-      val b = { slot: s, hash: hash }
+  pure def parentReadyBlocks(slot: Slot, msgs: Set[Message]): Set[Block] = {
+    if (not(firstSlotInLeaderWindow(slot))) Set() else
+    allBlocks.filter(b =>
       and {
+        b.slot < slot,
         or {
-          isCertified(NotarizationCertificate(b), msgs),
-          isCertified(NotarFallbackCertificate(b), msgs)
+          isCertified(NotarizationCertificate(b.reference()), msgs),
+          isCertified(NotarFallbackCertificate(b.reference()), msgs)
         },
         b.slot.to(slot).subseteq(slotsSkipCertified(msgs))
       }
@@ -408,9 +408,9 @@ module alpenglow {
     val blocksWithNotarVotes =
       allMessages
         .filter(m => slotOf(m.msg) == now)
-        .fold(Set(), (s, m) => match m.msg {
-          | NotarVoteMsg(n) => s.setAdd(n)
-          | _ => s
+        .filterMap(m => match m.msg {
+          | NotarVoteMsg(n) => Some(n)
+          | _ => None
         })
 
     // Σ_b notar(b)
@@ -444,14 +444,12 @@ module alpenglow {
   // Listeners (Algorithm 1)
   // -----------------------------------------------------------------------------
 
-  /// Listen for block input
-  pure def listen_block_inputs(ctx: LocalContext): Set[Transition] = {
-    val availableBlocks = allBlocks.filter(b => aliveSlots.contains(b.slot))
-
-    availableBlocks.map(b => upon_block_input(ctx, b))
+  /// Listen for block input - returns parameters for process_block_input
+  pure def listen_block_inputs(ctx: LocalContext): Set[Block] = {
+    allBlocks.filter(b => aliveSlots.contains(b.slot))
   }
 
-  pure def upon_block_input(ctx: LocalContext, b: Block): Transition = {
+  pure def process_block_input(ctx: LocalContext, b: Block): Transition = {
     val tn = tryNotar(ctx.state, b) // looks like a function but has two side effects: changes state and broadcasts
     if (tn.success)
       val cpb = checkPendingBlocks(tn.result.post_state)
@@ -465,13 +463,13 @@ module alpenglow {
       tn.result
   }
 
-  /// Listen for timeout events
-  pure def listen_timeouts(ctx: LocalContext): Set[Transition] = {
+  /// Listen for timeout events - returns parameters for skip_window_if_voted
+  pure def listen_timeouts(ctx: LocalContext): Set[Slot] = {
     val activeTimeouts = ctx.events
-    aliveSlots.filter(slot => activeTimeouts.contains(slot)).map(s => upon_timeout(ctx, s))
+    aliveSlots.filter(slot => activeTimeouts.contains(slot))
   }
 
-  pure def upon_timeout(ctx: LocalContext, slot: Slot): Transition = {
+  pure def skip_window_if_voted(ctx: LocalContext, slot: Slot): Transition = {
     val ls = ctx.state
 
     if (not(Voted.in(ls.state[slot])))
@@ -481,71 +479,69 @@ module alpenglow {
       { effects: Set(), post_state: ls }
   }
 
-  /// Listen for block notarized events
-  pure def listen_block_notarized(ctx: LocalContext): Set[Transition] = {
+  /// Listen for block notarized events - returns parameters for try_finalize_block
+  pure def listen_block_notarized(ctx: LocalContext): Set[{ slot: Slot, hash: Blockhash }] = {
     val notarizedBlocks = allBlocks.filter(b =>
       isCertified(NotarizationCertificate({ slot: b.slot, hash: b.hash }), ctx.messages) and
       aliveSlots.contains(b.slot)
     )
 
-    notarizedBlocks.map(block => upon_block_notarized(ctx, block.slot, block.hash))
+    notarizedBlocks.map(block => { slot: block.slot, hash: block.hash })
   }
 
-  pure def upon_block_notarized(ctx: LocalContext, slot: Slot, hash: Blockhash): Transition = {
-    val s1 = addObjects(ctx.state, slot, Set(BlockNotarized(hash)))
-    tryFinal(s1, slot, hash)
+  pure def try_finalize_block(ctx: LocalContext, params: { slot: Slot, hash: Blockhash }): Transition = {
+    val s1 = addObjects(ctx.state, params.slot, Set(BlockNotarized(params.hash)))
+    tryFinal(s1, params.slot, params.hash)
   }
 
-  /// Listen for parent ready events
-  pure def listen_parent_ready(ctx: LocalContext): Set[Transition] = {
-    val readyBlocks = allBlocks.filter(b =>
-      aliveSlots.contains(b.slot) and
-      parentReadyCondition(b.slot, b.hash, ctx.messages)
-    )
+  /// Listen for parent ready events - returns parameters for check_pending_and_start_timeout
+  pure def listen_parent_ready(ctx: LocalContext): Set[{ slot: Slot, hash: Blockhash }] = {
+    val readyBlocks = aliveSlots.map(s =>
+      parentReadyBlocks(s, ctx.messages)
+    ).flatten()
 
-    readyBlocks.map(block => upon_parent_ready(ctx, block.slot, block.hash))
+    readyBlocks.map(block => block.reference())
   }
 
-  pure def upon_parent_ready(ctx: LocalContext, slot: Slot, hash: Blockhash): Transition = {
+  pure def check_pending_and_start_timeout(ctx: LocalContext, params: { slot: Slot, hash: Blockhash }): Transition = {
     val r1 =
-      addObjects(ctx.state, slot, Set(ParentReady(hash)))
+      addObjects(ctx.state, params.slot, Set(ParentReady(params.hash)))
         .checkPendingBlocks()
     // Start time for all slots in this window
-    val r2 = setTimeouts(r1.post_state, slot)
+    val r2 = setTimeouts(r1.post_state, params.slot)
     { effects: r1.effects.union(r2.effects), post_state: r2.post_state }
   }
 
-  /// Listen for safe to notar events
-  pure def listen_safe_to_notar(ctx: LocalContext): Set[Transition] = {
+  /// Listen for safe to notar events - returns parameters for broadcast_fallback_notar_vote
+  pure def listen_safe_to_notar(ctx: LocalContext): Set[{ slot: Slot, hash: Blockhash }] = {
     val safeBlocks = allBlocks.filter(b =>
       aliveSlots.contains(b.slot) and
       safeToNotarCondition(ctx.state.process_id, ctx.messages, b.slot, b)
     )
 
-    safeBlocks.map(block => upon_safe_to_notar(ctx, block.slot, block.hash))
+    safeBlocks.map(block => { slot: block.slot, hash: block.hash })
   }
 
-  pure def upon_safe_to_notar(ctx: LocalContext, slot: Slot, hash: Blockhash): Transition = {
-    val s1 = trySkipWindow(ctx.state, slot)
-    if (not(ItsOver.in(s1.post_state.state[slot])))
+  pure def broadcast_fallback_notar_vote(ctx: LocalContext, params: { slot: Slot, hash: Blockhash }): Transition = {
+    val s1 = trySkipWindow(ctx.state, params.slot)
+    if (not(ItsOver.in(s1.post_state.state[params.slot])))
       // Notar-fallback vote
       val effects = s1.effects.union(
         Set(choreo::Broadcast({
           sender: ctx.state.process_id,
-          msg: NotarFallBackVoteMsg({ slot: slot, hash: hash })
+          msg: NotarFallBackVoteMsg({ slot: params.slot, hash: params.hash })
         }))
       )
-      { effects: effects, post_state: addObjects(s1.post_state, slot, Set(BadWindow)) }
+      { effects: effects, post_state: addObjects(s1.post_state, params.slot, Set(BadWindow)) }
     else
       s1
   }
 
-  /// Listen for safe to skip events
-  pure def listen_safe_to_skip(ctx: LocalContext): Set[Transition] =
-    val safeSlots = aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, ctx.messages, slot))
-    safeSlots.map(slot => upon_safe_to_skip(ctx, slot))
+  /// Listen for safe to skip events - returns parameters for broadcast_fallback_skip_vote
+  pure def listen_safe_to_skip(ctx: LocalContext): Set[Slot] =
+    aliveSlots.filter(slot => safeToSkipCondition(ctx.state.process_id, ctx.messages, slot))
 
-  pure def upon_safe_to_skip(ctx: LocalContext, slot: Slot): Transition = {
+  pure def broadcast_fallback_skip_vote(ctx: LocalContext, slot: Slot): Transition = {
     val s1 = trySkipWindow(ctx.state, slot)
     if (not(ItsOver.in(s1.post_state.state[slot])))
       // Skip-fallback vote
@@ -557,15 +553,15 @@ module alpenglow {
       s1
   }
 
-  /// Main listener combining all event handlers
+  /// Main listener combining all event handlers using choreo::cue pattern
   pure def main_listener(ctx: LocalContext): Set[Transition] =
     Set(
-      listen_block_inputs(ctx),
-      listen_timeouts(ctx),
-      listen_block_notarized(ctx),
-      listen_parent_ready(ctx),
-      listen_safe_to_notar(ctx),
-      listen_safe_to_skip(ctx)
+      choreo::cue(ctx, listen_block_inputs, process_block_input),
+      choreo::cue(ctx, listen_timeouts, skip_window_if_voted),
+      choreo::cue(ctx, listen_block_notarized, try_finalize_block),
+      choreo::cue(ctx, listen_parent_ready, check_pending_and_start_timeout),
+      choreo::cue(ctx, listen_safe_to_notar, broadcast_fallback_notar_vote),
+      choreo::cue(ctx, listen_safe_to_skip, broadcast_fallback_skip_vote)
     ).flatten()
 
   // -----------------------------------------------------------------------------
@@ -666,13 +662,11 @@ module alpenglow {
   // Setup for runs
   // -----------------------------------------------------------------------------
 
-  action step_with(v: ProcessID, listener: LocalContext => Set[Transition]): bool =
-    choreo::step_with(v, listener, (c, _) => c)
+  def with_cue(process, listen_fn, params) =
+    choreo::with_cue(process, listen_fn, params)
 
-  action receiveSpecificBlock(v: ProcessID, b: Block): bool = all {
-    allBlocks.contains(b),
-    step_with(v, (ctx) => Set(upon_block_input(ctx, b)))
-  }
+  action perform(cue_ctx, upon_fn) =
+    choreo::perform(cue_ctx, upon_fn, (c, _) => c)
 }
 
 module some_byz {
@@ -699,17 +693,19 @@ module some_byz {
   ).*
 
   run ffTest =
+    pure val block = { hash: 42, parent: -1, slot: 0 }
     init
-    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
-    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
-    .then(receiveSpecificBlock("v3", { hash: 42, parent: -1, slot: 0 }))
-    .then(receiveSpecificBlock("v4", { hash: 42, parent: -1, slot: 0 }))
-    .expect(fastFinalized(0, allMessages) == Set(42))
+      .then("v1".with_cue(listen_block_inputs, block).perform(process_block_input))
+      .then("v2".with_cue(listen_block_inputs, block).perform(process_block_input))
+      .then("v3".with_cue(listen_block_inputs, block).perform(process_block_input))
+      .then("v4".with_cue(listen_block_inputs, block).perform(process_block_input))
+      .expect(fastFinalized(0, allMessages) == Set(42))
 }
 
 module some_byz_vp {
+  // This module sets different voting powers
   // For a trace where a value is fast finalized call
-  // quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness
+  // quint run alpenglow.qnt --main some_byz_vp --invariant fastFinalizedWitness
   import alpenglow(
     correct = Set("v1", "v2"),
     good = Set(),
@@ -731,10 +727,11 @@ module some_byz_vp {
   ).*
 
   run ffTest =
+    pure val block = { hash: 42, parent: -1, slot: 0 }
     init
-    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
-    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
-    .expect(fastFinalized(0, allMessages) == Set(42))
+      .then("v1".with_cue(listen_block_inputs, block).perform(process_block_input))
+      .then("v2".with_cue(listen_block_inputs, block).perform(process_block_input))
+      .expect(fastFinalized(0, allMessages) == Set(42))
 }
 
 module too_many_byz_1 {
@@ -782,42 +779,42 @@ module too_many_byz {
 
   run disagreementTest =
     init
-    .then(receiveSpecificBlock("v3", { hash: 41, parent: -1, slot: 0 }))
-    .then(receiveSpecificBlock("v4", { hash: 41, parent: -1, slot: 0 }))
+      .then("v3".with_cue(listen_block_inputs, { hash: 41, parent: -1, slot: 0 }).perform(process_block_input))
+      .then("v4".with_cue(listen_block_inputs, { hash: 41, parent: -1, slot: 0 }).perform(process_block_input))
 
-    .expect(
-      Set(
-        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
-        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" },
-      ).subseteq(allMessages)
-    )
+      .expect(
+        Set(
+          { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+          { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" },
+        ).subseteq(allMessages)
+      )
 
-    .then(receiveSpecificBlock("v2", { hash: 42, parent: -1, slot: 0 }))
-    .then(step_with("v3", (ctx) => Set(upon_block_notarized(ctx, 0, 41))))
-    .then(step_with("v4", (ctx) => Set(upon_block_notarized(ctx, 0, 41))))
-    .expect(
-      Set(
-        { msg: FinalVoteMsg(0), sender: "v3" },
-        { msg: FinalVoteMsg(0), sender: "v4" }
-      ).subseteq(allMessages)
-    )
+      .then("v2".with_cue(listen_block_inputs, { hash: 42, parent: -1, slot: 0 }).perform(process_block_input))
+      .then("v3".with_cue(listen_block_notarized, { slot: 0, hash: 41 }).perform(try_finalize_block))
+      .then("v4".with_cue(listen_block_notarized, { slot: 0, hash: 41 }).perform(try_finalize_block))
+      .expect(
+        Set(
+          { msg: FinalVoteMsg(0), sender: "v3" },
+          { msg: FinalVoteMsg(0), sender: "v4" }
+        ).subseteq(allMessages)
+      )
 
-    .then(receiveSpecificBlock("v1", { hash: 42, parent: -1, slot: 0 }))
-    .expect(not(agreement))
-    .expect(
-      Set(
-        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
-        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" },
-        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b1" },
-        { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b2" },
-        { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v1" },
-        { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v2" },
-        { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b1" },
-        { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b2" },
-        { msg: FinalVoteMsg(0), sender: "v3" },
-        { msg: FinalVoteMsg(0), sender: "v4" },
-        { msg: FinalVoteMsg(0), sender: "b1" },
-        { msg: FinalVoteMsg(0), sender: "b2" }
-      ).subseteq(allMessages)
-    )
+      .then("v1".with_cue(listen_block_inputs, { hash: 42, parent: -1, slot: 0 }).perform(process_block_input))
+      .expect(not(agreement))
+      .expect(
+        Set(
+          { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v3" },
+          { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "v4" },
+          { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b1" },
+          { msg: NotarVoteMsg({ hash: 41, slot: 0 }), sender: "b2" },
+          { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v1" },
+          { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "v2" },
+          { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b1" },
+          { msg: NotarVoteMsg({ hash: 42, slot: 0 }), sender: "b2" },
+          { msg: FinalVoteMsg(0), sender: "v3" },
+          { msg: FinalVoteMsg(0), sender: "v4" },
+          { msg: FinalVoteMsg(0), sender: "b1" },
+          { msg: FinalVoteMsg(0), sender: "b2" }
+        ).subseteq(allMessages)
+      )
 }
