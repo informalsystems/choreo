@@ -19,9 +19,9 @@ module awsDnsRace {
   // Constants and Types
   // =============================================================================
 
-  const ENACTORS: Set[str]
-  const PLAN_AGE_THRESHOLD: int
-  const MAX_PLAN: int
+  pure val ENACTORS: Set[str] = Set("enactor1", "enactor2")
+  pure val PLAN_AGE_THRESHOLD: int = 2
+  pure val MAX_PLAN: int = 5
 
   // Enactor program counter states
   pure val PC_IDLE = 0
@@ -193,16 +193,4 @@ module awsDnsRace {
   val neverDeleteActive: bool = {
     current_plan == 0 or not(isPlanDeleted(current_plan))
   }
-}
-
-// =============================================================================
-// Example Configuration Module
-// =============================================================================
-
-module awsDnsRaceExample {
-  import awsDnsRace(
-    ENACTORS = Set("enactor1", "enactor2"),
-    PLAN_AGE_THRESHOLD = 2,
-    MAX_PLAN = 5
-  ).*
 }
