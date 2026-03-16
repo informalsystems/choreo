@@ -207,12 +207,12 @@ module atm_distributed_witnesses {
   // Witness: canProcessMultipleCycles
   // ──────────────────────────────────────────────────────────
   // Goal: Verify the protocol can complete multiple withdrawal cycles end-to-end
-  // Condition: Some ATM's next_request_id > 1 (initiated at least 2 requests)
+  // Condition: Some account's round > 1 on some ATM (at least 2 commits for that account)
   // Rationale: Confirms locks are properly released and the system resets for subsequent operations
   //
   // Execution path:
-  //   1. ATM1 completes one full withdrawal cycle (next_request_id increments to 1)
-  //   2. ATM1 initiates another withdrawal (next_request_id increments to 2)
+  //   1. ATM1 completes one full withdrawal cycle for Alice (round increments to 1)
+  //   2. Any ATM completes another withdrawal for Alice (round increments to 2)
   //
   // EXPECTED: Invariant violation (proves protocol is not stuck after first round)
   //
@@ -220,7 +220,9 @@ module atm_distributed_witnesses {
   //        --invariant=canProcessMultipleCycles --max-steps=20 --max-samples=1000 --backend=rust
   // ──────────────────────────────────────────────────────────
   val atmAttemptedMultipleCycles: bool =
-    ATMS.exists(atm => s.system.get(atm).next_request_id > 1)
+    ATMS.exists(atm =>
+      ACCOUNTS.exists(acc => s.system.get(atm).rounds.get(acc) > 1)
+    )
 
   val canProcessMultipleCycles: bool = not(atmAttemptedMultipleCycles)
 
@@ -316,17 +318,16 @@ module atm_distributed_witnesses {
   // Witness: canConflictThenCommit
   // ──────────────────────────────────────────────────────────
   // Goal: Verify the protocol is live after a conflict — one ATM aborts, the other commits
-  // Condition: total_withdrawn > 0 for some account AND some ATM has next_request_id > 0
-  //   (the ATM recycled its request counter, meaning a full cycle completed)
-  // Rationale: Confirms the protocol doesn't deadlock after a conflict. The mutual-grant
-  //   fix denies one ATM so the other can collect quorum and commit.
-  //   next_request_id > 0 means the committing ATM has cleared its pending state
-  //   and is ready for another round.
+  // Condition: total_withdrawn > 0 for some account AND some ATM's round > 0
+  //   (a commit completed, advancing the round)
+  // Rationale: Confirms the protocol doesn't deadlock after a conflict. The pending-withdrawal
+  //   deny denies one ATM so the other can collect quorum and commit.
+  //   round > 0 means a withdrawal committed and the account advanced to the next round.
   //
   // Execution path:
   //   1. ATM1 and ATM2 race for Alice — ATM2 is denied, ATM1 commits
-  //   2. ATM1's pending clears, next_request_id increments to 1
-  //   → total_withdrawn["Alice"] > 0 AND ATM1.next_request_id == 1
+  //   2. ATM1's round for Alice advances to 1
+  //   → total_withdrawn["Alice"] > 0 AND round["Alice"] == 1
   //
   // EXPECTED: Invariant violation (proves protocol recovers from conflicts)
   //
@@ -335,7 +336,9 @@ module atm_distributed_witnesses {
   // ──────────────────────────────────────────────────────────
   val commitAfterCycle: bool =
     anyWithdrawalTracked and
-    ATMS.exists(atm => s.system.get(atm).next_request_id > 0)
+    ATMS.exists(atm =>
+      ACCOUNTS.exists(acc => s.system.get(atm).rounds.get(acc) > 0)
+    )
 
   val canConflictThenCommit: bool = not(commitAfterCycle)
 }

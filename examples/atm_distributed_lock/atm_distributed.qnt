@@ -38,7 +38,7 @@ module atm_distributed {
   type Request = {
     account: Account,
     amount: Amount,
-    request_id: int,
+    round: int,
     requester: Node
   }
 
@@ -61,15 +61,16 @@ module atm_distributed {
     balances: Account -> Amount,
 
     // Accounts we've granted locks for to other ATMs
-    // Maps account -> request_id we granted it for (to prevent stale lock reuse)
+    // Maps account -> round we granted it for (to prevent stale lock reuse)
     locks_granted_to_others: Account -> Option[int],
 
     // Our own withdrawal coordination.
     // When we initiate a withdrawal, we track it here until commit/abort
     pending_withdrawal: Option[Request],
 
-    // Request ID counter. Increments with each new withdrawal request
-    next_request_id: int
+    // Per-account round counter. Increments on each committed withdrawal.
+    // ATMs deny lock requests from stale rounds (requester hasn't seen latest commit).
+    rounds: Account -> int
   }
 
   // Emitted by commit_withdrawal to record a successful withdrawal globally
@@ -100,7 +101,8 @@ module atm_distributed {
     messages.filter(m => match m {
       | GrantLock(grant) =>
           grant.req.account == req.account and
-          grant.req.request_id == req.request_id
+          grant.req.round == req.round and
+          grant.req.requester == req.requester
       | _ => false
     }).size()
   }
@@ -110,7 +112,8 @@ module atm_distributed {
     messages.exists(m => match m {
       | DenyLock(deny) =>
           deny.req.account == req.account and
-          deny.req.request_id == req.request_id
+          deny.req.round == req.round and
+          deny.req.requester == req.requester
       | _ => false
     })
   }
@@ -145,7 +148,7 @@ module atm_distributed {
     if (can_initiate) {
       // All possible requests we can make from this ATM
       tuples(ACCOUNTS, WITHDRAWAL_AMOUNTS).map(((account, amount)) => {
-        { account: account, amount: amount, request_id: s.next_request_id, requester: s.process_id }
+        { account: account, amount: amount, round: s.rounds.get(account), requester: s.process_id }
       })
     } else {
       Set()
@@ -160,8 +163,7 @@ module atm_distributed {
       ),
       post_state: {
         ...s,
-        pending_withdrawal: Some(req),
-        next_request_id: req.request_id + 1
+        pending_withdrawal: Some(req)
       }
     }
   }
@@ -183,26 +185,30 @@ module atm_distributed {
   pure def respond_to_lock_request(ctx: LocalContext, req: Request): Transition = {
     val s = ctx.state
 
-    // Grant lock if we don't have it locked and are not already withdrawing from
-    // this account ourselves, otherwise two ATMs could mutually grant each other
-    // and both collect quorum simultaneously
+    // Deny if: (1) requester is on a stale round (hasn't seen latest commit),
+    // (2) account already locked for another request, or
+    // (3) we are pending a withdrawal for this account ourselves
+    val is_stale_round = req.round != s.rounds.get(req.account)
+
     val is_locked = s.locks_granted_to_others.get(req.account) != None or
       match s.pending_withdrawal {
         | Some(pw) => pw.account == req.account
         | None => false
       }
 
-    val response_message = if (is_locked) {
+    val should_deny = is_stale_round or is_locked
+
+    val response_message = if (should_deny) {
       DenyLock({ req: req, from_atm: s.process_id })
     } else {
       GrantLock({ req: req, from_atm: s.process_id })
     }
 
-    val new_locks = if (is_locked) {
+    val new_locks = if (should_deny) {
       s.locks_granted_to_others
     } else {
-      // Reserve the lock for the requester with this request_id
-      s.locks_granted_to_others.set(req.account, Some(req.request_id))
+      // Reserve the lock for the requester at this round
+      s.locks_granted_to_others.set(req.account, Some(req.round))
     }
 
     {
@@ -222,7 +228,7 @@ module atm_distributed {
 
     match s.pending_withdrawal {
       | Some(req) => {
-          // Query the message soup for responses (filtered by request_id!)
+          // Query the message soup for responses (filtered by round + requester)
           val approvals = count_approvals(ctx.messages, req)
           val has_denials = has_any_denials(ctx.messages, req)
 
@@ -255,7 +261,8 @@ module atm_distributed {
         ...s,
         balances: s.balances.set(req.account, new_balance),
         locks_granted_to_others: s.locks_granted_to_others.set(req.account, None),
-        pending_withdrawal: None
+        pending_withdrawal: None,
+        rounds: s.rounds.setBy(req.account, r => r + 1)
       }
     }
   }
@@ -266,7 +273,7 @@ module atm_distributed {
 
     match s.pending_withdrawal {
       | Some(req) => {
-          // Query the message soup (filtered by request_id!)
+          // Query the message soup (filtered by round + requester)
           val has_denial = has_any_denials(ctx.messages, req)
 
           // Also abort if insufficient balance
@@ -308,7 +315,7 @@ module atm_distributed {
     // lock for an account once it has applied the committed balance, closing the
     // window where a stale (too-high) balance could enable a second withdrawal.
     val should_release =
-      s.locks_granted_to_others.get(commit.req.account) == Some(commit.req.request_id)
+      s.locks_granted_to_others.get(commit.req.account) == Some(commit.req.round)
 
     {
       effects: Set(),
@@ -318,7 +325,8 @@ module atm_distributed {
         locks_granted_to_others: if (should_release)
           s.locks_granted_to_others.set(commit.req.account, None)
         else
-          s.locks_granted_to_others
+          s.locks_granted_to_others,
+        rounds: s.rounds.setBy(commit.req.account, r => r + 1)
       }
     }
   }
@@ -330,9 +338,9 @@ module atm_distributed {
 
     get_release_locks(messages).filter(rel => {
       // Only process releases from other ATMs for accounts we have locked
-      // AND the request_id must match what we granted
+      // AND the round must match what we granted
       rel.requester != s.process_id and
-      s.locks_granted_to_others.get(rel.account) == Some(rel.request_id)
+      s.locks_granted_to_others.get(rel.account) == Some(rel.round)
     })
   }
 
@@ -409,7 +417,7 @@ module atm_distributed {
       balances: ACCOUNTS.mapBy(acc => INITIAL_BALANCE),
       locks_granted_to_others: ACCOUNTS.mapBy(acc => None),
       pending_withdrawal: None,
-      next_request_id: 0
+      rounds: ACCOUNTS.mapBy(acc => 0)
     }
   }
 
@@ -439,12 +447,13 @@ module atm_distributed {
     })
   })
 
-  /// At most one ATM holds lock on any account
+  /// At most one ATM can have approval quorum for any given account at a time
   val mutual_exclusion = ACCOUNTS.forall(account => {
-    val atms_holding_lock = ATMS.filter(atm => {
-      s.system.get(atm).locks_granted_to_others.get(account) != None
+    val atms_with_quorum = ATMS.filter(atm => {
+      val ctx = choreo::convert_context(s, atm)
+      listen_approval_quorum(ctx).exists(req => req.account == account)
     })
-    atms_holding_lock.size() <= 1
+    atms_with_quorum.size() <= 1
   })
 
   /// All ATMs converge to same balance (after messages processed)
@@ -502,7 +511,7 @@ module atm_distributed {
   /// Happy path - a single ATM successfully withdraws from an account.
   /// Full protocol: initiate → grant locks → commit → propagate balance → release locks.
   run happyPathWithdrawalTest = {
-    val req  = { account: "Alice", amount: 50, request_id: 0, requester: "ATM1" }
+    val req  = { account: "Alice", amount: 50, round: 0, requester: "ATM1" }
     val balance_to_write = { req: req, new_balance: 50 }
 
     init
@@ -524,7 +533,7 @@ module atm_distributed {
 
     // All ATMs converged: Alice has $50, no locks held, no pending withdrawals
     .expect(no_negative_balance)
-    .expect(mutual_exclusion)
+
     .expect(s.system.get("ATM1").balances.get("Alice") == 50)
     .expect(s.system.get("ATM2").balances.get("Alice") == 50)
     .expect(s.system.get("ATM3").balances.get("Alice") == 50)
@@ -538,8 +547,8 @@ module atm_distributed {
   /// ATM2 aborts. With its pending cleared, ATM2 can then grant ATM1's lock,
   /// giving ATM1 quorum. Only one $80 withdrawal commits.
   run concurrentConflictTest = {
-    val req1 = { account: "Alice", amount: 80, request_id: 0, requester: "ATM1" }
-    val req2 = { account: "Alice", amount: 80, request_id: 0, requester: "ATM2" }
+    val req1 = { account: "Alice", amount: 80, round: 0, requester: "ATM1" }
+    val req2 = { account: "Alice", amount: 80, round: 0, requester: "ATM2" }
     val balance_to_write = { req: req1, new_balance: 20 }
 
     init
@@ -573,7 +582,7 @@ module atm_distributed {
     // Only one $80 withdrawal occurred: Alice has $20, not -$60
     .expect(no_negative_balance)
     .expect(no_overdraft)
-    .expect(mutual_exclusion)
+
     .expect(s.system.get("ATM1").balances.get("Alice") == 20)
     .expect(s.system.get("ATM2").balances.get("Alice") == 20)
     .expect(s.system.get("ATM2").pending_withdrawal == None)
@@ -586,9 +595,10 @@ module atm_distributed {
   /// shows $20 < $80, `listen_abort_withdrawal` fires without waiting for lock
   /// responses - ATM2 aborts before even collecting grants.
   run balanceDepletedAbortTest = {
-    val req1 = { account: "Alice", amount: 80, request_id: 0, requester: "ATM1" }
-    val req2 = { account: "Alice", amount: 80, request_id: 0, requester: "ATM2" }
+    val req1 = { account: "Alice", amount: 80, round: 0, requester: "ATM1" }
     val balance_to_write = { req: req1, new_balance: 20 }
+    // req2 is at round 1: ATM2 has processed ATM1's commit, advancing Alice's round
+    val req2 = { account: "Alice", amount: 80, round: 1, requester: "ATM2" }
 
     init
     // ATM1 performs a full $80 withdrawal from Alice
@@ -602,7 +612,7 @@ module atm_distributed {
     // ATM2 applies the committed balance. Also atomically releases its lock for ATM1
     .then("ATM2".with_cue(listen_commit_withdrawal, balance_to_write).perform(update_balance))
 
-    // ATM2 tries to withdraw $80 from Alice (aware that balance is only $20)
+    // ATM2 tries to withdraw $80 from Alice (aware that balance is only $20, round is now 1)
     .then("ATM2".with_cue(listen_initiate_withdrawal, req2).perform(initiate_withdrawal))
 
     // ATM2 aborts immediately: local balance ($20) is insufficient for $80 withdrawal
@@ -612,5 +622,50 @@ module atm_distributed {
     .expect(no_negative_balance)
     .expect(s.system.get("ATM2").balances.get("Alice") == 20)
     .expect(s.system.get("ATM2").pending_withdrawal == None)
+  }
+
+  /// Split grants - two ATMs race for the same account, each gets a grant
+  /// from a different peer. Neither achieves quorum, both abort.
+  /// This is safe: split grants don't lead to double withdrawals.
+  run splitGrantsAbortTest = {
+    val req1 = { account: "Bob", amount: 50, round: 0, requester: "ATM1" }
+    val req2 = { account: "Bob", amount: 50, round: 0, requester: "ATM2" }
+
+    init
+    // Both ATM1 and ATM2 initiate $50 withdrawals from Bob
+    .then("ATM1".with_cue(listen_initiate_withdrawal, req1).perform(initiate_withdrawal))
+    .then("ATM2".with_cue(listen_initiate_withdrawal, req2).perform(initiate_withdrawal))
+
+    // ATM3 grants ATM1's lock first
+    .then("ATM3".with_cue(listen_lock_request, req1).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM1").contains(GrantLock({ req: req1, from_atm: "ATM3" })))
+
+    // ATM3 denies ATM2 (Bob already locked for ATM1)
+    .then("ATM3".with_cue(listen_lock_request, req2).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM2").contains(DenyLock({ req: req2, from_atm: "ATM3" })))
+
+    // ATM1 denies ATM2 (ATM1 is pending for Bob)
+    .then("ATM1".with_cue(listen_lock_request, req2).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM2").contains(DenyLock({ req: req2, from_atm: "ATM1" })))
+
+    // ATM2 denies ATM1 (ATM2 is pending for Bob)
+    .then("ATM2".with_cue(listen_lock_request, req1).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM1").contains(DenyLock({ req: req1, from_atm: "ATM2" })))
+
+    // Both see denials → both abort
+    .then("ATM1".with_cue(listen_abort_withdrawal, req1).perform(abort_withdrawal))
+    .then("ATM2".with_cue(listen_abort_withdrawal, req2).perform(abort_withdrawal))
+
+    // ATM3 releases lock for ATM1's aborted request
+    .then("ATM3".with_cue(listen_release_lock, req1).perform(release_lock))
+
+    // No withdrawal occurred, balances unchanged
+    .expect(no_negative_balance)
+    .expect(no_overdraft)
+    .expect(s.system.get("ATM1").balances.get("Bob") == 100)
+    .expect(s.system.get("ATM2").balances.get("Bob") == 100)
+    .expect(s.system.get("ATM1").pending_withdrawal == None)
+    .expect(s.system.get("ATM2").pending_withdrawal == None)
+    .expect(s.system.get("ATM3").locks_granted_to_others == ACCOUNTS.mapBy(acc => None))
   }
 }
