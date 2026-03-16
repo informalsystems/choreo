@@ -22,77 +22,95 @@ bash -
 ### OK on tendermint valid module - run with invariants
 
 <!-- !test check tendermint valid - run with invariants -->
-    cd examples/tendermint && quint run tendermint.qnt --main valid --invariant="agreement and validity and accountability" --max-samples=20 --verbosity 1
-
+    cd examples/tendermint && quint run tendermint.qnt --main valid --invariant="agreement and validity and accountability" --max-samples=20
 ### OK on tendermint valid module - test
 
 <!-- !test check tendermint valid - test -->
-    cd examples/tendermint && quint test tendermint.qnt --main valid --max-samples=20 --verbosity 1
-
+    cd examples/tendermint && quint test tendermint.qnt --main valid --max-samples=20
 ### FAIL on tendermint no_agreement module - run with agreement (should find counterexample)
 
 <!-- !test exit 1 -->
 <!-- !test check tendermint no_agreement - run with agreement (should fail) -->
-    cd examples/tendermint && quint run tendermint.qnt --main no_agreement --invariant=agreement --verbosity 1
-
+    cd examples/tendermint && quint run tendermint.qnt --main no_agreement --invariant=agreement
 ### OK on tendermint no_agreement module - run with accountability only
 
 <!-- !test check tendermint no_agreement - run with accountability -->
-    cd examples/tendermint && quint run tendermint.qnt --main no_agreement --invariant=accountability --max-samples=20 --verbosity 1
-
+    cd examples/tendermint && quint run tendermint.qnt --main no_agreement --invariant=accountability --max-samples=20
 ### OK on tendermint no_agreement module - test
 
 <!-- !test check tendermint no_agreement - test -->
-    cd examples/tendermint && quint test tendermint.qnt --main no_agreement --max-samples=20 --verbosity 1
-
+    cd examples/tendermint && quint test tendermint.qnt --main no_agreement --max-samples=20
 ## Alpenglow Examples
 
 ### OK on alpenglow some_byz module - run with agreement
 
 <!-- !test check alpenglow some_byz - run with agreement -->
-    cd examples/alpenglow && quint run alpenglow.qnt --main some_byz --invariant agreement --max-samples 20 --verbosity 1
-
+    cd examples/alpenglow && quint run alpenglow.qnt --main some_byz --invariant agreement --max-samples 20
 ### OK on alpenglow tests
 
 <!-- !test check alpenglow tests -->
-    cd examples/alpenglow && quint test alpenglow_tests.qnt --verbosity 1
-
+    cd examples/alpenglow && quint test alpenglow_tests.qnt
 ### OK on alpenglow disagreement test
 
 <!-- !test check alpenglow disagreement test -->
-    cd examples/alpenglow && quint test alpenglow.qnt --main too_many_byz --verbosity 1
-
+    cd examples/alpenglow && quint test alpenglow.qnt --main too_many_byz
 ### FAIL on alpenglow some_byz module - run with fastFinalizedWitness
 
 <!-- !test exit 1 -->
 <!-- !test check alpenglow some_byz - run with fastFinalizedWitness -->
-    cd examples/alpenglow && quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness --verbosity 1
-
+    cd examples/alpenglow && quint run alpenglow.qnt --main some_byz --invariant fastFinalizedWitness
 ### FAIL on alpenglow some_byz_vp module - run with fastFinalizedWitness
 
 <!-- !test exit 1 -->
 <!-- !test check alpenglow some_byz_vp - run with fastFinalizedWitness -->
-    cd examples/alpenglow && quint run alpenglow.qnt --main some_byz_vp --invariant fastFinalizedWitness --verbosity 1
-
+    cd examples/alpenglow && quint run alpenglow.qnt --main some_byz_vp --invariant fastFinalizedWitness
 ### FAIL on alpenglow too_many_byz_1 module - run with agreement (should find counterexample)
 
 <!-- !test exit 1 -->
 <!-- !test check alpenglow too_many_byz_1 - run with agreement (should fail) -->
-    cd examples/alpenglow && quint run alpenglow.qnt --main too_many_byz_1 --invariant agreement --verbosity 1
-
+    cd examples/alpenglow && quint run alpenglow.qnt --main too_many_byz_1 --invariant agreement
 ### FAIL on alpenglow too_many_byz module - run with agreement (should find counterexample)
 
 <!-- !test exit 1 -->
 <!-- !test check alpenglow too_many_byz - run with agreement (should fail) -->
-    cd examples/alpenglow && quint run alpenglow.qnt --main too_many_byz --invariant agreement --verbosity 1
-
+    cd examples/alpenglow && quint run alpenglow.qnt --main too_many_byz --invariant agreement
 ## MonadBFT Examples
 
 ### OK on monadbft instance - run with missing_tip_w
 
 <!-- !test check monadbft instance - run with missing_tip_w -->
-    cd examples/monadbft && quint run instance.qnt --max-steps 50 --invariant missing_tip_w --hide monadbft::choreo::s --max-samples=20 --verbosity 1
+    cd examples/monadbft && quint run instance.qnt --max-steps 50 --invariant missing_tip_w --hide monadbft::choreo::s --max-samples=20
+## Two Phase Commit Examples
 
+### OK on two_phase_commit - test
+
+<!-- !test check two_phase_commit - test -->
+    cd examples/two_phase_commit && quint test two_phase_commit.qnt --main two_phase_commit
+### OK on two_phase_commit - run with consistency
+
+<!-- !test check two_phase_commit - run with consistency -->
+    cd examples/two_phase_commit && quint run two_phase_commit.qnt --main two_phase_commit --invariant=consistency --max-samples=20
+### FAIL on two_phase_commit - wit_commit witness (should find counterexample)
+
+<!-- !test exit 1 -->
+<!-- !test check two_phase_commit - wit_commit witness (should fail) -->
+    cd examples/two_phase_commit && quint run two_phase_commit.qnt --main=two_phase_commit --invariant=wit_commit --max-steps=20 --max-samples=500
+## ATM Distributed Lock Examples
+
+### OK on atm_distributed_lock - test
+
+<!-- !test check atm_distributed_lock - test -->
+    cd examples/atm_distributed_lock && quint test atm_distributed.qnt --main atm_distributed
+### FAIL on atm_distributed_lock - canHaveConcurrentConflict witness (should find counterexample)
+
+<!-- !test exit 1 -->
+<!-- !test check atm_distributed_lock - canHaveConcurrentConflict witness (should fail) -->
+    cd examples/atm_distributed_lock && quint run atm_distributed_witnesses.qnt --main=atm_distributed_witnesses --invariant=canHaveConcurrentConflict --max-steps=10 --max-samples=500
+### FAIL on atm_distributed_lock - canConflictThenCommit witness (should find counterexample)
+
+<!-- !test exit 1 -->
+<!-- !test check atm_distributed_lock - canConflictThenCommit witness (should fail) -->
+    cd examples/atm_distributed_lock && quint run atm_distributed_witnesses.qnt --main=atm_distributed_witnesses --invariant=canConflictThenCommit --max-steps=30 --max-samples=1000
 ## Additional Verification Tests
 
 ### OK on typecheck choreo
