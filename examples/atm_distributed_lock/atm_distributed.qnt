@@ -7,12 +7,11 @@
  * withdrawals: without coordination, two ATMs could approve simultaneous
  * withdrawals, allowing a user to withdraw more than their balance.
  *
- * PROBLEM DEMONSTRATED:
+ * Problem we want to avoid:
  * User has $100 in account. Two ATMs process $80 withdrawal requests
  * simultaneously. Without coordination, both might see balance=$100,
  * both approve, and user withdraws $160 total.
  *
- * SOLUTION IMPLEMENTED:
  * ATMs use a distributed locking protocol:
  * 1. ATM requests lock from all other ATMs before withdrawal
  * 2. Only proceeds if all ATMs grant the lock
@@ -25,10 +24,6 @@
 module atm_distributed {
   import basicSpells.* from "../../spells/basicSpells"
   import choreo(processes = ATMS) as choreo from "../../choreo"
-
-  // =============================================================================
-  // PROTOCOL-SPECIFIC TYPES
-  // =============================================================================
 
   // Account identifiers
   type Account = str
@@ -46,10 +41,6 @@ module atm_distributed {
     request_id: int,
     requester: Node
   }
-
-  // =============================================================================
-  // MANDATORY CHOREO TYPE DEFINITIONS
-  // =============================================================================
 
   // Messages exchanged between ATMs for coordination
   type Message =
@@ -69,15 +60,15 @@ module atm_distributed {
     // Local database replica - each ATM has a copy of all balances
     balances: Account -> Amount,
 
-    // LOCK RESPONDER: Accounts we've granted locks for to other ATMs
+    // Accounts we've granted locks for to other ATMs
     // Maps account -> request_id we granted it for (to prevent stale lock reuse)
-    locks_granted_to_others: Account -> int,
+    locks_granted_to_others: Account -> Option[int],
 
-    // LOCK REQUESTER: Our own withdrawal coordination
-    // (when we initiate a withdrawal, we track it here until commit/abort)
+    // Our own withdrawal coordination.
+    // When we initiate a withdrawal, we track it here until commit/abort
     pending_withdrawal: Option[Request],
 
-    // Request ID counter - increments with each new withdrawal request
+    // Request ID counter. Increments with each new withdrawal request
     next_request_id: int
   }
 
@@ -87,9 +78,6 @@ module atm_distributed {
   // Global environment tracking total amount withdrawn per account across all ATMs
   type Extensions = { total_withdrawn: Account -> Amount }
 
-  // =============================================================================
-  // BOILERPLATE TYPE ALIASES
-  // =============================================================================
   type LocalState = choreo::LocalState[Node, StateFields]
   type LocalContext = choreo::LocalContext[Node, StateFields, Message, Event, Extensions]
   type Transition = choreo::Transition[Node, StateFields, Message, Event, CustomEffects]
@@ -155,12 +143,9 @@ module atm_distributed {
     val can_initiate = s.pending_withdrawal == None
 
     if (can_initiate) {
-      // Non-deterministically choose any account and amount to withdraw
-      // In a real system, this would come from user input
-      ACCOUNTS.fold(Set(), (acc, account) => {
-        WITHDRAWAL_AMOUNTS.fold(acc, (acc2, amount) => {
-          acc2.union(Set({ account: account, amount: amount, request_id: s.next_request_id, requester: s.process_id }))
-        })
+      // All possible requests we can make from this ATM
+      tuples(ACCOUNTS, WITHDRAWAL_AMOUNTS).map(((account, amount)) => {
+        { account: account, amount: amount, request_id: s.next_request_id, requester: s.process_id }
       })
     } else {
       Set()
@@ -201,7 +186,7 @@ module atm_distributed {
     // Grant lock if we don't have it locked and are not already withdrawing from
     // this account ourselves, otherwise two ATMs could mutually grant each other
     // and both collect quorum simultaneously
-    val is_locked = s.locks_granted_to_others.keys().contains(req.account) or
+    val is_locked = s.locks_granted_to_others.get(req.account) != None or
       match s.pending_withdrawal {
         | Some(pw) => pw.account == req.account
         | None => false
@@ -217,7 +202,7 @@ module atm_distributed {
       s.locks_granted_to_others
     } else {
       // Reserve the lock for the requester with this request_id
-      s.locks_granted_to_others.put(req.account, req.request_id)
+      s.locks_granted_to_others.set(req.account, Some(req.request_id))
     }
 
     {
@@ -269,7 +254,7 @@ module atm_distributed {
       post_state: {
         ...s,
         balances: s.balances.set(req.account, new_balance),
-        locks_granted_to_others: s.locks_granted_to_others.mapRemove(req.account),
+        locks_granted_to_others: s.locks_granted_to_others.set(req.account, None),
         pending_withdrawal: None
       }
     }
@@ -323,8 +308,7 @@ module atm_distributed {
     // lock for an account once it has applied the committed balance, closing the
     // window where a stale (too-high) balance could enable a second withdrawal.
     val should_release =
-      s.locks_granted_to_others.keys().contains(commit.req.account) and
-      s.locks_granted_to_others.get(commit.req.account) == commit.req.request_id
+      s.locks_granted_to_others.get(commit.req.account) == Some(commit.req.request_id)
 
     {
       effects: Set(),
@@ -332,7 +316,7 @@ module atm_distributed {
         ...s,
         balances: s.balances.set(commit.req.account, commit.new_balance),
         locks_granted_to_others: if (should_release)
-          s.locks_granted_to_others.mapRemove(commit.req.account)
+          s.locks_granted_to_others.set(commit.req.account, None)
         else
           s.locks_granted_to_others
       }
@@ -348,8 +332,7 @@ module atm_distributed {
       // Only process releases from other ATMs for accounts we have locked
       // AND the request_id must match what we granted
       rel.requester != s.process_id and
-      s.locks_granted_to_others.keys().contains(rel.account) and
-      s.locks_granted_to_others.get(rel.account) == rel.request_id
+      s.locks_granted_to_others.get(rel.account) == Some(rel.request_id)
     })
   }
 
@@ -360,7 +343,7 @@ module atm_distributed {
       effects: Set(),
       post_state: {
         ...s,
-        locks_granted_to_others: s.locks_granted_to_others.mapRemove(rel.account)
+        locks_granted_to_others: s.locks_granted_to_others.set(rel.account, None)
       }
     }
   }
@@ -424,7 +407,7 @@ module atm_distributed {
     {
       process_id: atm,
       balances: ACCOUNTS.mapBy(acc => INITIAL_BALANCE),
-      locks_granted_to_others: Map(),
+      locks_granted_to_others: ACCOUNTS.mapBy(acc => None),
       pending_withdrawal: None,
       next_request_id: 0
     }
@@ -459,7 +442,7 @@ module atm_distributed {
   /// At most one ATM holds lock on any account
   val mutual_exclusion = ACCOUNTS.forall(account => {
     val atms_holding_lock = ATMS.filter(atm => {
-      s.system.get(atm).locks_granted_to_others.keys().contains(account)
+      s.system.get(atm).locks_granted_to_others.get(account) != None
     })
     atms_holding_lock.size() <= 1
   })
@@ -543,8 +526,8 @@ module atm_distributed {
     .expect(s.system.get("ATM1").balances.get("Alice") == 50)
     .expect(s.system.get("ATM2").balances.get("Alice") == 50)
     .expect(s.system.get("ATM3").balances.get("Alice") == 50)
-    .expect(s.system.get("ATM2").locks_granted_to_others == Map())
-    .expect(s.system.get("ATM3").locks_granted_to_others == Map())
+    .expect(s.system.get("ATM2").locks_granted_to_others == ACCOUNTS.mapBy(acc => None))
+    .expect(s.system.get("ATM3").locks_granted_to_others == ACCOUNTS.mapBy(acc => None))
   }
 
   /// Concurrent conflict - two ATMs race to withdraw from the same account.
@@ -588,7 +571,7 @@ module atm_distributed {
     .expect(s.system.get("ATM1").balances.get("Alice") == 20)
     .expect(s.system.get("ATM2").balances.get("Alice") == 20)
     .expect(s.system.get("ATM2").pending_withdrawal == None)
-    .expect(s.system.get("ATM3").locks_granted_to_others == Map())
+    .expect(s.system.get("ATM3").locks_granted_to_others == ACCOUNTS.mapBy(acc => None))
   }
 
   /// Insufficient balance causes immediate abort.

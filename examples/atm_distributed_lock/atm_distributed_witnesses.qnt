@@ -8,6 +8,7 @@
 
 module atm_distributed_witnesses {
   import atm_distributed.* from "./atm_distributed"
+  import basicSpells.* from "../../spells/basicSpells"
 
   // ============================================================
   // WITNESS CATALOG
@@ -170,7 +171,9 @@ module atm_distributed_witnesses {
   // ──────────────────────────────────────────────────────────
   val anyLockGrantedToOther: bool =
     ATMS.exists(atm =>
-      s.system.get(atm).locks_granted_to_others.keys().size() > 0
+      ACCOUNTS.exists(acc =>
+        s.system.get(atm).locks_granted_to_others.get(acc) != None
+      )
     )
 
   val canGrantLockToAnother: bool = not(anyLockGrantedToOther)
@@ -270,7 +273,11 @@ module atm_distributed_witnesses {
   // ──────────────────────────────────────────────────────────
   val allLocksReleasedAfterCommit: bool =
     anyBalanceDecreased and
-    ATMS.forall(atm => s.system.get(atm).locks_granted_to_others.keys().size() == 0)
+    ATMS.forall(atm =>
+      ACCOUNTS.forall(acc =>
+        s.system.get(atm).locks_granted_to_others.get(acc) == None
+      )
+    )
 
   val canReleaseLockViaCommit: bool = not(allLocksReleasedAfterCommit)
 
