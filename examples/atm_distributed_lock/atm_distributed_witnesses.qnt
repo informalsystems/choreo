@@ -1,11 +1,7 @@
 // -*- mode: Bluespec; -*-
-// Witness invariants for atm_distributed
+// Witness properties for atm_distributed, generated with Quint LLM Kit [1]
 //
-// IMPORTANT: These are REACHABILITY CHECKS via negated invariants.
-// Random simulation tries to VIOLATE these invariants.
-// Violation = scenario is reachable (good!)
-// No violation = scenario may be unreachable (investigate spec)
-
+// [1]: https://github.com/informalsystems/quint-llm-kit
 module atm_distributed_witnesses {
   import atm_distributed.* from "./atm_distributed"
   import basicSpells.* from "../../spells/basicSpells"

@@ -511,7 +511,9 @@ module atm_distributed {
 
     // ATM2 and ATM3 receive the lock request; account is free so both grant it
     .then("ATM2".with_cue(listen_lock_request, req).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM1").contains(GrantLock({ req: req, from_atm: "ATM2" })))
     .then("ATM3".with_cue(listen_lock_request, req).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM1").contains(GrantLock({ req: req, from_atm: "ATM3" })))
 
     // ATM1 has quorum (grants from ATM2 + ATM3) and sufficient balance → commits
     .then("ATM1".with_cue(listen_approval_quorum, req).perform(commit_withdrawal))
@@ -547,16 +549,20 @@ module atm_distributed {
 
     // ATM3 grants ATM1's lock first (Alice is free, ATM3 has no pending)
     .then("ATM3".with_cue(listen_lock_request, req1).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM1").contains(GrantLock({ req: req1, from_atm: "ATM3" })))
     // ATM3 denies ATM2's lock (Alice already locked for ATM1)
     .then("ATM3".with_cue(listen_lock_request, req2).perform(respond_to_lock_request))
-    // ATM1 also denies ATM2's lock: ATM1 is pending for Alice (fix: pending counts as locked)
+    .expect(s.messages.get("ATM2").contains(DenyLock({ req: req2, from_atm: "ATM3" })))
+    // ATM1 also denies ATM2's lock: ATM1 is pending for Alice 
     .then("ATM1".with_cue(listen_lock_request, req2).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM2").contains(DenyLock({ req: req2, from_atm: "ATM1" })))
 
     // ATM2 receives denials from both ATM3 and ATM1 → aborts
     .then("ATM2".with_cue(listen_abort_withdrawal, req2).perform(abort_withdrawal))
 
     // ATM2's pending is now None → it can grant ATM1's lock request
     .then("ATM2".with_cue(listen_lock_request, req1).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM1").contains(GrantLock({ req: req1, from_atm: "ATM2" })))
 
     // ATM1 has quorum (grants from ATM3 + ATM2) → commits
     .then("ATM1".with_cue(listen_approval_quorum, req1).perform(commit_withdrawal))
@@ -589,6 +595,8 @@ module atm_distributed {
     .then("ATM1".with_cue(listen_initiate_withdrawal, req1).perform(initiate_withdrawal))
     .then("ATM2".with_cue(listen_lock_request, req1).perform(respond_to_lock_request))
     .then("ATM3".with_cue(listen_lock_request, req1).perform(respond_to_lock_request))
+    .expect(s.messages.get("ATM1").contains(GrantLock({ req: req1, from_atm: "ATM2" })))
+    .expect(s.messages.get("ATM1").contains(GrantLock({ req: req1, from_atm: "ATM3" })))
     .then("ATM1".with_cue(listen_approval_quorum, req1).perform(commit_withdrawal))
 
     // ATM2 applies the committed balance. Also atomically releases its lock for ATM1
