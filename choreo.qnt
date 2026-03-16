@@ -294,4 +294,16 @@ module choreo {
       | NoCue => all { false, s' = s }
     }
   }
+
+  action perform_with_displayer(
+    cue_result: CueResult[p, s, m, e, ext, r],
+    upon_fn: (LocalContext[p, s, m, e, ext], r) => Transition[p, s, m, e, ce],
+    apply_custom_effect: EffectProcessor[p, s, m, e, ce, ext],
+    displayer: Displayer[p, s, m, e, extensions, d],
+  ): bool = {
+    match cue_result {
+      | CueOk(cue) => process_transitions_with_displayer(cue.ctx.state.process_id, Set(upon_fn(cue.ctx, cue.params)), apply_custom_effect, displayer)
+      | NoCue => all { false, s' = s, display' = display }
+    }
+  }
 }
