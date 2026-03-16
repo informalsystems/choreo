@@ -22,7 +22,8 @@ jobs:
     - name: Install Quint
       run: |
         npm install -g @informalsystems/quint
-        quint --version
+        # Triggers installation of the rust backend before the concurent tests
+        quint run examples/two_phase_commit/two_phase_commit.qnt --main two_phase_commit --max-samples 1
 
     - name: Install txm (test runner)
       run: npm install -g txm
