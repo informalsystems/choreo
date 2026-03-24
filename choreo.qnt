@@ -124,16 +124,9 @@ module choreo {
     transitions: Set[Transition[p, s, m, e, ce]],
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
   ): bool =
-    // FIXME: Quint was supposed to detect determinism alone
-    if (transitions.size() == 1) {
-      val transition = transitions.getOnlyElement()
-      val post_env = apply_effect(s, v, transition, apply_custom_effect)
-      s' = post_env
-    } else {
-      nondet transition = oneOf(transitions)
-      val post_env = apply_effect(s, v, transition, apply_custom_effect)
-      s' = post_env
-    }
+    nondet transition = oneOf(transitions)
+    val post_env = apply_effect(s, v, transition, apply_custom_effect)
+    s' = post_env
 
   action process_transitions_with_displayer(
     v: p,
@@ -141,21 +134,11 @@ module choreo {
     apply_custom_effect: EffectProcessor[p, s, m, e, ce, extensions],
     displayer: Displayer[p, s, m, e, extensions, d],
   ): bool =
-    // FIXME: Quint was supposed to detect determinism alone
-    if (transitions.size() == 1) {
-      val transition = transitions.getOnlyElement()
-      val post_env = apply_effect(s, v, transition, apply_custom_effect)
-      all {
-        s' = post_env,
-        display' = displayer(post_env),
-      }
-    } else {
-      nondet transition = oneOf(transitions)
-      val post_env = apply_effect(s, v, transition, apply_custom_effect)
-      all {
-        s' = post_env,
-        display' = displayer(post_env),
-      }
+    nondet transition = oneOf(transitions)
+    val post_env = apply_effect(s, v, transition, apply_custom_effect)
+    all {
+      s' = post_env,
+      display' = displayer(post_env),
     }
 
   action init(ctx: GlobalContext[p, s, m , e, ext]): bool = {
