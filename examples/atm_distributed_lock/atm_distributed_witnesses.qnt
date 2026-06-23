@@ -1,4 +1,3 @@
-// -*- mode: Bluespec; -*-
 // Witness properties for atm_distributed, generated with Quint LLM Kit [1]
 //
 // [1]: https://github.com/informalsystems/quint-llm-kit

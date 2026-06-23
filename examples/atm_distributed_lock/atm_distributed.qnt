@@ -1,4 +1,3 @@
-// -*- mode: Bluespec; -*-
 /**
  * Distributed ATM System with Coordinated Withdrawals
  *

@@ -1,4 +1,3 @@
-// -*- mode: Bluespec; -*-
 /**
  * Choreo Protocol Template
  *
